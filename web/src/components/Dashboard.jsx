@@ -176,36 +176,42 @@ export default function Dashboard({
       </div>
 
       {/* 3. MODO OPERACIONAL E ESTRATÉGIA NO COMANDO */}
-      <div className="bg-gradient-to-r from-zinc-900 via-zinc-900/90 to-zinc-950 border border-zinc-800 p-3.5 rounded-2xl shadow-lg space-y-2.5">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <Cpu size={15} className={isAutoAI ? "text-violet-400" : "text-blue-400"} />
-            <span className="text-[11px] font-mono font-bold text-zinc-200 uppercase">
-              Modo Operacional
-            </span>
-          </div>
-          <span className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded-full border ${
-            isAutoAI 
-              ? 'bg-violet-500/20 text-violet-300 border-violet-500/40' 
-              : 'bg-zinc-800 text-zinc-300 border-zinc-700'
-          }`}>
-            {isAutoAI ? '🤖 IA / SCOUT AUTO' : '👤 MANUAL'}
-          </span>
-        </div>
+<div className="bg-gradient-to-r from-zinc-900 via-zinc-900/90 to-zinc-950 border border-zinc-800 p-3.5 rounded-2xl shadow-lg space-y-2.5">
+  <div className="flex items-center justify-between">
+    <div className="flex items-center gap-2">
+      <Cpu size={15} className={isAutoAI ? "text-violet-400" : "text-blue-400"} />
+      <span className="text-[11px] font-mono font-bold text-zinc-200 uppercase">
+        Modo Operacional
+      </span>
+    </div>
+    <span className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded-full border ${
+      isAutoAI 
+        ? 'bg-violet-500/20 text-violet-300 border-violet-500/40' 
+        : 'bg-zinc-800 text-zinc-300 border-zinc-700'
+    }`}>
+      {isAutoAI ? '🤖 IA / SCOUT AUTO' : '👤 MANUAL'}
+    </span>
+  </div>
 
-        <div className="grid grid-cols-2 gap-2 text-[10px] font-mono bg-zinc-950/70 p-2.5 rounded-xl border border-zinc-800/60">
-          <div>
-            <span className="text-zinc-500 block">Entrada FVG:</span>
-            <strong className="text-zinc-200 font-semibold">{activeStrategy.entry_type}</strong>
-          </div>
-          <div>
-            <span className="text-zinc-500 block">Break-Even Live:</span>
-            <strong className={activeStrategy.breakeven.includes("ATIVO") ? "text-emerald-400 font-semibold" : "text-zinc-400"}>
-              {activeStrategy.breakeven}
-            </strong>
-          </div>
-        </div>
-      </div>
+  <div className="grid grid-cols-3 gap-2 text-[10px] font-mono bg-zinc-950/70 p-2.5 rounded-xl border border-zinc-800/60">
+    <div>
+      <span className="text-zinc-500 block">Perfil Ativo:</span>
+      <strong className="text-emerald-400 font-bold uppercase">
+        {settings?.profile === 'guardiao' ? 'GUARDIAN (1:1.5)' : settings?.profile === 'sniper' ? 'SNIPER (1:4.0)' : 'TACTICAL (1:2.5)'}
+      </strong>
+    </div>
+    <div>
+      <span className="text-zinc-500 block">Entrada FVG:</span>
+      <strong className="text-zinc-200 font-semibold">{activeStrategy.entry_type.replace('Consequent Encroachment ', '')}</strong>
+    </div>
+    <div>
+      <span className="text-zinc-500 block">Break-Even:</span>
+      <strong className={activeStrategy.breakeven.includes("ATIVO") ? "text-emerald-400 font-semibold" : "text-zinc-400"}>
+        {activeStrategy.breakeven}
+      </strong>
+    </div>
+  </div>
+</div>
 
       {/* 4. RADAR DO STRATEGY SCOUT */}
       <div className="bg-zinc-900/90 border border-zinc-800 p-4 rounded-2xl shadow-xl space-y-2.5">
