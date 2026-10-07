@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { UserCheck, Power, Sparkles, BarChart3, AlertTriangle, X, CheckCircle2, Trophy, ArrowRight, Loader2 } from 'lucide-react';
+import { UserCheck, Power, Sparkles, BarChart3, AlertTriangle, X, CheckCircle2, Trophy, ArrowRight, Loader2, DollarSign } from 'lucide-react';
 
 export default function Dashboard({ 
   status, 
@@ -18,6 +18,9 @@ export default function Dashboard({
   const [showEmergencyModal, setShowEmergencyModal] = useState(false);
   const [selectedAsset, setSelectedAsset] = useState('US100');
   const [selectedDays, setSelectedDays] = useState(2);
+
+  // Valor base de risco para simular o PnL no modal ($)
+  const currentRiskBase = Number(settings?.risk_per_trade || 50);
 
   const handleBacktestClick = () => {
     onRunBacktest(selectedDays, selectedAsset);
@@ -68,7 +71,7 @@ export default function Dashboard({
         </div>
       </div>
 
-      {/* SANDBOX / BACKTEST CUSTOMIZÁVEL */}
+      {/* SANDBOX BACKTEST */}
       <div className="bg-gradient-to-br from-zinc-900 to-zinc-950 border border-zinc-800/80 p-4 rounded-2xl space-y-3 shadow-xl">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -84,7 +87,7 @@ export default function Dashboard({
           )}
         </div>
 
-        {/* 1. SELETOR DE ATIVO */}
+        {/* SELETOR DE ATIVO */}
         <div>
           <span className="text-[10px] font-mono text-zinc-400 block mb-1.5 uppercase">Target Asset</span>
           <div className="grid grid-cols-2 gap-2">
@@ -109,9 +112,9 @@ export default function Dashboard({
           </div>
         </div>
 
-        {/* 2. SELETOR DE DIAS */}
+        {/* SELETOR DE DIAS */}
         <div>
-          <span className="text-[10px] font-mono text-zinc-400 block mb-1.5 uppercase">Lookback Window</span>
+          <span className="text-[10px] font-mono text-zinc-400 block mb-1.5 uppercase">Lookback Window (M5 ➔ M1 Execution)</span>
           <div className="grid grid-cols-4 gap-1.5">
             {[1, 2, 3, 5].map((d) => (
               <button
@@ -128,7 +131,6 @@ export default function Dashboard({
           </div>
         </div>
 
-        {/* BOTÃO DISPARADOR */}
         <button
           onClick={handleBacktestClick}
           disabled={isBacktestLoading}
@@ -136,7 +138,7 @@ export default function Dashboard({
           {isBacktestLoading ? (
             <>
               <Loader2 size={14} className="animate-spin text-amber-400" />
-              <span>Analyzing {selectedAsset} ({selectedDays}D)...</span>
+              <span>Scanning M1 Execution for {selectedAsset} ({selectedDays}D)...</span>
             </>
           ) : (
             <>
@@ -154,10 +156,12 @@ export default function Dashboard({
         <Power size={14} /> Emergency Stop (Flatten & Cancel)
       </button>
 
-      {/* MODAL 1: RELATÓRIO DO BACKTEST (COM ESTADO DE CARREGAMENTO) */}
+      {/* MODAL QUANTITATIVO RICO: RESULTADO DO BACKTEST */}
       {showReportModal && (
         <div className="fixed inset-0 bg-black/85 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-zinc-900 border border-zinc-800 w-full max-w-sm rounded-2xl p-5 shadow-2xl relative animate-in fade-in zoom-in-95 duration-150 space-y-4">
+          <div className="bg-zinc-900 border border-zinc-800 w-full max-w-md rounded-2xl p-5 shadow-2xl relative animate-in fade-in zoom-in-95 duration-150 space-y-4">
+            
+            {/* Botão de Fechar que NUNCA reabre sozinho */}
             <button
               onClick={() => setShowReportModal(false)}
               className="absolute top-4 right-4 text-zinc-500 hover:text-zinc-200">
@@ -165,100 +169,184 @@ export default function Dashboard({
             </button>
 
             {isBacktestLoading ? (
-              <div className="py-8 flex flex-col items-center justify-center text-center space-y-3">
-                <Loader2 size={32} className="animate-spin text-amber-400" />
+              <div className="py-10 flex flex-col items-center justify-center text-center space-y-3">
+                <Loader2 size={36} className="animate-spin text-amber-400" />
                 <div>
-                  <h3 className="text-sm font-bold text-zinc-100 font-mono">Running MT5 Sandbox</h3>
+                  <h3 className="text-sm font-bold text-zinc-100 font-mono">Simulating M1 Scalping Execution</h3>
                   <p className="text-[11px] text-zinc-400 font-mono mt-1">
-                    Scanning historical M5 candles and calculating FVG win rates...
+                    Analyzing candle-by-candle touch, Stop Loss and Target expansions...
                   </p>
                 </div>
               </div>
             ) : latestBacktest ? (
               <>
+                {/* CABEÇALHO */}
                 <div className="flex items-center gap-3">
                   <div className="p-2.5 bg-amber-500/10 border border-amber-500/20 text-amber-400 rounded-xl">
                     <Trophy size={22} />
                   </div>
                   <div>
                     <h3 className="text-sm font-bold text-zinc-100 font-mono uppercase">
-                      {latestBacktest.symbol} Backtest
+                      {latestBacktest.symbol} Backtest Report
                     </h3>
                     <span className="text-[10px] text-zinc-400 font-mono">
-                      {latestBacktest.days} Days Window • {latestBacktest.setups} Setups Formed
+                      {latestBacktest.days} Days Window • {latestBacktest.setups} Setups Formed • Base Risk: ${latestBacktest.base_risk || currentRiskBase}
                     </span>
                   </div>
                 </div>
 
-                <div className="space-y-2">
-                  <div className={`p-2.5 rounded-xl border flex items-center justify-between ${
-                    latestBacktest.recommended === 'SNIPER'
-                      ? 'bg-amber-500/10 border-amber-500/40'
-                      : 'bg-zinc-950 border-zinc-800/70'
-                  }`}>
-                    <div>
-                      <strong className="text-xs font-bold font-mono text-zinc-200 block">SNIPER (1:4 R:R)</strong>
-                      <span className="text-[9px] text-zinc-500 font-mono">Tight SL • Long expansion target</span>
+                {/* CARDS COMPARATIVOS DETALHADOS (SNIPER, TÁTICO, GUARDIÃO) */}
+                <div className="space-y-2.5">
+                  
+                  {/* SNIPER */}
+                  {latestBacktest.sniper && (
+                    <div className={`p-3 rounded-xl border ${
+                      latestBacktest.recommended === 'SNIPER'
+                        ? 'bg-amber-500/10 border-amber-500/50 shadow-lg shadow-amber-950/30'
+                        : 'bg-zinc-950 border-zinc-800/80'
+                    }`}>
+                      <div className="flex items-center justify-between mb-1.5">
+                        <div className="flex items-center gap-2">
+                          <strong className="text-xs font-bold font-mono text-amber-300">SNIPER (1:4 R:R)</strong>
+                          {latestBacktest.recommended === 'SNIPER' && (
+                            <span className="text-[9px] bg-amber-500/20 text-amber-300 px-1.5 py-0.2 rounded font-bold font-mono">
+                              BEST PNL
+                            </span>
+                          )}
+                        </div>
+                        <span className="text-xs font-black font-mono text-zinc-200">
+                          {latestBacktest.sniper.rate}% Win
+                        </span>
+                      </div>
+                      
+                      <div className="grid grid-cols-3 gap-2 text-[10px] font-mono text-zinc-400 bg-zinc-900/60 p-2 rounded-lg border border-zinc-800/60">
+                        <div>
+                          <span className="text-zinc-500 block">W / L</span>
+                          <strong className="text-zinc-200">{latestBacktest.sniper.wins}W / {latestBacktest.sniper.losses}L</strong>
+                        </div>
+                        <div>
+                          <span className="text-zinc-500 block">Net R</span>
+                          <strong className={latestBacktest.sniper.net_r >= 0 ? "text-emerald-400" : "text-rose-400"}>
+                            {latestBacktest.sniper.net_r >= 0 ? `+${latestBacktest.sniper.net_r}R` : `${latestBacktest.sniper.net_r}R`}
+                          </strong>
+                        </div>
+                        <div className="text-right">
+                          <span className="text-zinc-500 block">Est. PNL</span>
+                          <strong className={`text-xs font-black ${latestBacktest.sniper.pnl >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
+                            {latestBacktest.sniper.pnl >= 0 ? `+$${latestBacktest.sniper.pnl}` : `-$${Math.abs(latestBacktest.sniper.pnl)}`}
+                          </strong>
+                        </div>
+                      </div>
                     </div>
-                    <div className="text-right">
-                      <span className="text-sm font-black font-mono text-amber-300">{latestBacktest.sniper_rate}%</span>
-                      <span className="text-[9px] text-zinc-500 block font-mono">Win Rate</span>
-                    </div>
-                  </div>
+                  )}
 
-                  <div className={`p-2.5 rounded-xl border flex items-center justify-between ${
-                    latestBacktest.recommended === 'TACTICAL'
-                      ? 'bg-blue-500/10 border-blue-500/40'
-                      : 'bg-zinc-950 border-zinc-800/70'
-                  }`}>
-                    <div>
-                      <strong className="text-xs font-bold font-mono text-zinc-200 block">TACTICAL (1:2.5 R:R)</strong>
-                      <span className="text-[9px] text-zinc-500 font-mono">Balanced SL • Medium target</span>
-                    </div>
-                    <div className="text-right">
-                      <span className="text-sm font-black font-mono text-blue-300">{latestBacktest.tatico_rate}%</span>
-                      <span className="text-[9px] text-zinc-500 block font-mono">Win Rate</span>
-                    </div>
-                  </div>
+                  {/* TACTICAL */}
+                  {latestBacktest.tatico && (
+                    <div className={`p-3 rounded-xl border ${
+                      latestBacktest.recommended === 'TACTICAL'
+                        ? 'bg-blue-500/10 border-blue-500/50 shadow-lg shadow-blue-950/30'
+                        : 'bg-zinc-950 border-zinc-800/80'
+                    }`}>
+                      <div className="flex items-center justify-between mb-1.5">
+                        <div className="flex items-center gap-2">
+                          <strong className="text-xs font-bold font-mono text-blue-300">TACTICAL (1:2.5 R:R)</strong>
+                          {latestBacktest.recommended === 'TACTICAL' && (
+                            <span className="text-[9px] bg-blue-500/20 text-blue-300 px-1.5 py-0.2 rounded font-bold font-mono">
+                              BEST PNL
+                            </span>
+                          )}
+                        </div>
+                        <span className="text-xs font-black font-mono text-zinc-200">
+                          {latestBacktest.tatico.rate}% Win
+                        </span>
+                      </div>
 
-                  <div className={`p-2.5 rounded-xl border flex items-center justify-between ${
-                    latestBacktest.recommended === 'GUARDIAN'
-                      ? 'bg-emerald-500/10 border-emerald-500/40'
-                      : 'bg-zinc-950 border-zinc-800/70'
-                  }`}>
-                    <div>
-                      <strong className="text-xs font-bold font-mono text-zinc-200 block">GUARDIAN (1:1.5 R:R)</strong>
-                      <span className="text-[9px] text-zinc-500 font-mono">Wide ATR SL • High hit rate</span>
+                      <div className="grid grid-cols-3 gap-2 text-[10px] font-mono text-zinc-400 bg-zinc-900/60 p-2 rounded-lg border border-zinc-800/60">
+                        <div>
+                          <span className="text-zinc-500 block">W / L</span>
+                          <strong className="text-zinc-200">{latestBacktest.tatico.wins}W / {latestBacktest.tatico.losses}L</strong>
+                        </div>
+                        <div>
+                          <span className="text-zinc-500 block">Net R</span>
+                          <strong className={latestBacktest.tatico.net_r >= 0 ? "text-emerald-400" : "text-rose-400"}>
+                            {latestBacktest.tatico.net_r >= 0 ? `+${latestBacktest.tatico.net_r}R` : `${latestBacktest.tatico.net_r}R`}
+                          </strong>
+                        </div>
+                        <div className="text-right">
+                          <span className="text-zinc-500 block">Est. PNL</span>
+                          <strong className={`text-xs font-black ${latestBacktest.tatico.pnl >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
+                            {latestBacktest.tatico.pnl >= 0 ? `+$${latestBacktest.tatico.pnl}` : `-$${Math.abs(latestBacktest.tatico.pnl)}`}
+                          </strong>
+                        </div>
+                      </div>
                     </div>
-                    <div className="text-right">
-                      <span className="text-sm font-black font-mono text-emerald-300">{latestBacktest.guardiao_rate}%</span>
-                      <span className="text-[9px] text-zinc-500 block font-mono">Win Rate</span>
+                  )}
+
+                  {/* GUARDIAN */}
+                  {latestBacktest.guardiao && (
+                    <div className={`p-3 rounded-xl border ${
+                      latestBacktest.recommended === 'GUARDIAN'
+                        ? 'bg-emerald-500/10 border-emerald-500/50 shadow-lg shadow-emerald-950/30'
+                        : 'bg-zinc-950 border-zinc-800/80'
+                    }`}>
+                      <div className="flex items-center justify-between mb-1.5">
+                        <div className="flex items-center gap-2">
+                          <strong className="text-xs font-bold font-mono text-emerald-300">GUARDIAN (1:1.5 R:R)</strong>
+                          {latestBacktest.recommended === 'GUARDIAN' && (
+                            <span className="text-[9px] bg-emerald-500/20 text-emerald-300 px-1.5 py-0.2 rounded font-bold font-mono">
+                              BEST PNL
+                            </span>
+                          )}
+                        </div>
+                        <span className="text-xs font-black font-mono text-zinc-200">
+                          {latestBacktest.guardiao.rate}% Win
+                        </span>
+                      </div>
+
+                      <div className="grid grid-cols-3 gap-2 text-[10px] font-mono text-zinc-400 bg-zinc-900/60 p-2 rounded-lg border border-zinc-800/60">
+                        <div>
+                          <span className="text-zinc-500 block">W / L</span>
+                          <strong className="text-zinc-200">{latestBacktest.guardiao.wins}W / {latestBacktest.guardiao.losses}L</strong>
+                        </div>
+                        <div>
+                          <span className="text-zinc-500 block">Net R</span>
+                          <strong className={latestBacktest.guardiao.net_r >= 0 ? "text-emerald-400" : "text-rose-400"}>
+                            {latestBacktest.guardiao.net_r >= 0 ? `+${latestBacktest.guardiao.net_r}R` : `${latestBacktest.guardiao.net_r}R`}
+                          </strong>
+                        </div>
+                        <div className="text-right">
+                          <span className="text-zinc-500 block">Est. PNL</span>
+                          <strong className={`text-xs font-black ${latestBacktest.guardiao.pnl >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
+                            {latestBacktest.guardiao.pnl >= 0 ? `+$${latestBacktest.guardiao.pnl}` : `-$${Math.abs(latestBacktest.guardiao.pnl)}`}
+                          </strong>
+                        </div>
+                      </div>
                     </div>
-                  </div>
+                  )}
+
                 </div>
 
+                {/* BOTÃO DE APLICAÇÃO */}
                 <div className="bg-zinc-950 p-3 rounded-xl border border-zinc-800/80 flex items-center justify-between">
                   <div>
-                    <span className="text-[10px] text-zinc-500 font-mono uppercase block">Recommended Profile</span>
-                    <strong className="text-xs font-bold text-emerald-400 font-mono">{latestBacktest.recommended}</strong>
+                    <span className="text-[10px] text-zinc-500 font-mono uppercase block">Recommended Choice</span>
+                    <strong className="text-xs font-bold text-emerald-400 font-mono">
+                      {latestBacktest.recommended} (Max Net PNL)
+                    </strong>
                   </div>
                   <button
                     onClick={() => applyRecommendedProfile(latestBacktest.recommended)}
-                    className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-bold font-mono transition-all flex items-center gap-1 shadow-md">
-                    <CheckCircle2 size={13} /> Apply Profile
+                    className="px-3.5 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-bold font-mono transition-all flex items-center gap-1.5 shadow-md">
+                    <CheckCircle2 size={14} /> Apply Profile
                   </button>
                 </div>
               </>
-            ) : (
-              <div className="py-6 text-center text-zinc-400 text-xs font-mono">
-                No backtest result available yet. Click "Run Backtest" to generate one.
-              </div>
-            )}
+            ) : null}
           </div>
         </div>
       )}
 
-      {/* MODAL 2: EMERGÊNCIA */}
+      {/* MODAL EMERGÊNCIA */}
       {showEmergencyModal && (
         <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-zinc-900 border border-zinc-800 w-full max-w-sm rounded-2xl p-5 shadow-2xl relative animate-in fade-in zoom-in-95 duration-150">

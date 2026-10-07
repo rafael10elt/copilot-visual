@@ -102,23 +102,21 @@ def manage_open_trades(settings):
                     req = {"action": mt5.TRADE_ACTION_SLTP, "position": p.ticket, "sl": float(entry_price - 0.1), "tp": p.tp}
                     mt5.order_send(req)
 
-def run_recent_backtest(engine, symbol, days=2):
+def run_recent_backtest(engine, symbol, days=2, risk_per_trade=50.0):
     """
-    BACKTEST DE ALTA FIDELIDADE:
-    Calcula FVGs no M5 (nível institucional) e simula o resultado no M1 (nível de execução real).
+    BACKTEST QUANTITATIVO COMPLETO (M5 -> M1):
+    Calcula Wins, Losses, R:R Líquido e PNL projetado em Dólares ($).
     """
-    print(f"\n📊 [BACKTEST] Running M5->M1 realistic scalping backtest for {symbol} ({days}D)...")
+    print(f"\n📊 [BACKTEST] Running full quantitative scan for {symbol} ({days}D) with ${risk_per_trade} risk/trade...")
 
-    # Puxa histórico de M5 para achar os FVGs
     total_m5 = int(days) * 240
     df_m5 = engine.get_candles(symbol, mt5.TIMEFRAME_M5, total_m5)
 
-    # Puxa histórico de M1 para simular o preço real
     total_m1 = int(days) * 1440
     df_m1 = engine.get_candles(symbol, mt5.TIMEFRAME_M1, total_m1)
 
     if df_m5 is None or df_m1 is None or len(df_m5) < 20 or len(df_m1) < 100:
-        print(f"⚠️ [BACKTEST] Candles insuficientes no MT5 para {symbol}.")
+        print(f"⚠️ [BACKTEST] Insufficient candles for {symbol}.")
         return None
 
     m1_highs = df_m1['high'].values
@@ -133,11 +131,10 @@ def run_recent_backtest(engine, symbol, days=2):
     spread_buffer = 1.0 if "US100" in symbol else 0.2
 
     setups = 0
-    sniper_wins = 0
-    tatico_wins = 0
-    guardiao_wins = 0
+    sniper_wins, sniper_losses = 0, 0
+    tatico_wins, tatico_losses = 0, 0
+    guardiao_wins, guardiao_losses = 0, 0
 
-    # Varre os FVGs formados no M5
     for i in range(len(df_m5) - 10):
         c1_high, c1_low = m5_highs[i], m5_lows[i]
         c3_high, c3_low = m5_highs[i+2], m5_lows[i+2]
@@ -149,7 +146,6 @@ def run_recent_backtest(engine, symbol, days=2):
         if not (is_buy or is_sell):
             continue
 
-        # Encontra o índice correspondente no M1 para simulação realista
         m1_start_idx = 0
         for idx in range(len(m1_times) - 60):
             if m1_times[idx] >= fvg_time:
@@ -160,7 +156,6 @@ def run_recent_backtest(engine, symbol, days=2):
             continue
 
         setups += 1
-        # Olha as próximas 60 velas de M1 (próxima 1 hora de mercado)
         sim_highs = m1_highs[m1_start_idx : min(m1_start_idx + 60, len(m1_highs))]
         sim_lows = m1_lows[m1_start_idx : min(m1_start_idx + 60, len(m1_lows))]
 
@@ -172,18 +167,24 @@ def run_recent_backtest(engine, symbol, days=2):
                 tp = entry + (risk * mult)
                 sl = entry - risk
                 win = False
+                loss = False
 
                 for h, l in zip(sim_highs, sim_lows):
                     if l <= sl:
-                        break # Stop loss atingido primeiro no M1
+                        loss = True
+                        break
                     if h >= tp:
-                        win = True # Take profit atingido primeiro no M1
+                        win = True
                         break
 
                 if win:
                     if profile == 'sniper': sniper_wins += 1
                     elif profile == 'tatico': tatico_wins += 1
                     elif profile == 'guardiao': guardiao_wins += 1
+                elif loss:
+                    if profile == 'sniper': sniper_losses += 1
+                    elif profile == 'tatico': tatico_losses += 1
+                    elif profile == 'guardiao': guardiao_losses += 1
 
         elif is_sell:
             entry = c3_high
@@ -193,38 +194,80 @@ def run_recent_backtest(engine, symbol, days=2):
                 tp = entry - (risk * mult)
                 sl = entry + risk
                 win = False
+                loss = False
 
                 for h, l in zip(sim_highs, sim_lows):
                     if h >= sl:
-                        break # Stop loss atingido primeiro no M1
+                        loss = True
+                        break
                     if l <= tp:
-                        win = True # Take profit atingido primeiro no M1
+                        win = True
                         break
 
                 if win:
                     if profile == 'sniper': sniper_wins += 1
                     elif profile == 'tatico': tatico_wins += 1
                     elif profile == 'guardiao': guardiao_wins += 1
+                elif loss:
+                    if profile == 'sniper': sniper_losses += 1
+                    elif profile == 'tatico': tatico_losses += 1
+                    elif profile == 'guardiao': guardiao_losses += 1
 
     if setups == 0:
         setups = 1
 
+    # Cálculos Quantitativos de R:R e PnL Líquido em Dólares ($)
     s_rate = int((sniper_wins / setups) * 100)
     t_rate = int((tatico_wins / setups) * 100)
     g_rate = int((guardiao_wins / setups) * 100)
 
-    recommended = "GUARDIAN" if g_rate >= max(s_rate, t_rate) else ("TACTICAL" if t_rate >= s_rate else "SNIPER")
+    # Net R = (Wins * Multiplicador) - (Losses * 1R)
+    s_net_r = round((sniper_wins * 4.0) - (sniper_losses * 1.0), 1)
+    t_net_r = round((tatico_wins * 2.5) - (tatico_losses * 1.0), 1)
+    g_net_r = round((guardiao_wins * 1.5) - (guardiao_losses * 1.0), 1)
+
+    s_pnl = round(s_net_r * risk_per_trade, 2)
+    t_pnl = round(t_net_r * risk_per_trade, 2)
+    g_pnl = round(g_net_r * risk_per_trade, 2)
+
+    # A recomendação agora é baseada no MAIOR LUCRO LÍQUIDO ($)
+    if g_pnl >= max(s_pnl, t_pnl):
+        recommended = "GUARDIAN"
+    elif t_pnl >= s_pnl:
+        recommended = "TACTICAL"
+    else:
+        recommended = "SNIPER"
 
     report = {
+        "timestamp": int(time.time()),
         "symbol": symbol,
         "days": days,
         "setups": setups,
-        "sniper_rate": s_rate,
-        "tatico_rate": t_rate,
-        "guardiao_rate": g_rate,
+        "base_risk": risk_per_trade,
+        "sniper": {
+            "rate": s_rate,
+            "wins": sniper_wins,
+            "losses": sniper_losses,
+            "net_r": s_net_r,
+            "pnl": s_pnl
+        },
+        "tatico": {
+            "rate": t_rate,
+            "wins": tatico_wins,
+            "losses": tatico_losses,
+            "net_r": t_net_r,
+            "pnl": t_pnl
+        },
+        "guardiao": {
+            "rate": g_rate,
+            "wins": guardiao_wins,
+            "losses": guardiao_losses,
+            "net_r": g_net_r,
+            "pnl": g_pnl
+        },
         "recommended": recommended
     }
-    print(f"✅ [BACKTEST COMPLETE] {symbol} ({days}D) -> Setups: {setups} | Sniper: {s_rate}% | Tactical: {t_rate}% | Guardian: {g_rate}% | Rec: {recommended}")
+    print(f"✅ [BACKTEST COMPLETE] {symbol} ({days}D) -> Recommended: {recommended} (Best PnL: max of ${s_pnl}, ${t_pnl}, ${g_pnl})")
     return report
 
 def get_m15_trend(engine, symbol):
@@ -298,11 +341,10 @@ def main():
                     if remote.get("active_symbol_mode"):
                         active_mode = remote.get("active_symbol_mode")
 
-                    # CANAL DIRETO DE COMANDO VIA copilot_settings
+                    # CANAL DIRETO DE COMANDO
                     cmd = remote.get("command")
                     if cmd:
                         print(f"📥 [DIRECT COMMAND RECEIVED] {cmd}")
-                        # Limpa o comando para não repetir
                         try:
                             sync.client.table("copilot_settings").update({"command": None}).eq("id", 1).execute()
                         except: pass
@@ -311,14 +353,14 @@ def main():
                             parts = cmd.split(":")
                             target_sym = parts[1] if len(parts) > 1 else "US100.cash"
                             target_days = int(parts[2]) if len(parts) > 2 else 2
+                            user_risk = float(remote.get("risk_per_trade") or 50.0)
 
-                            report = run_recent_backtest(engine, target_sym, target_days)
+                            report = run_recent_backtest(engine, target_sym, target_days, user_risk)
                             if report:
-                                # Salva direto no status e também nos logs
                                 try:
                                     sync.client.table("copilot_status").update({"last_backtest": report}).eq("id", 1).execute()
                                 except Exception as e:
-                                    print(f"Erro ao salvar backtest no status: {e}")
+                                    print(f"Erro ao salvar backtest: {e}")
                                 sync.add_log(target_sym, f"BACKTEST_RESULT:{json.dumps(report)}", "SUCCESS")
                             else:
                                 sync.add_log(target_sym, "BACKTEST FAILED: Insufficient candles", "DANGER")
@@ -328,7 +370,7 @@ def main():
                             p = close_all_open_positions()
                             sync.add_log(None, f"EMERGENCY EXECUTED: Cancelled {c} orders, closed {p} positions", "DANGER")
 
-            # 3. Gestão Ativa de Ordens Abertas (BE & Trailing)
+            # 3. Gestão Ativa de Ordens (BE & Trailing)
             manage_open_trades(cached_settings)
 
             # 4. Ativos Ativos

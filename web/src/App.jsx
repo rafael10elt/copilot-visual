@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { createClient } from '@supabase/supabase-js';
 import { Zap, LayoutDashboard, Sliders, ScrollText, Volume2, VolumeX } from 'lucide-react';
 import Dashboard from './components/Dashboard';
@@ -21,14 +21,19 @@ export default function App() {
   const [showReportModal, setShowReportModal] = useState(false);
   const [isBacktestLoading, setIsBacktestLoading] = useState(false);
 
+  // Trava para evitar que o modal reabra a cada heartbeat
+  const isAwaitingBacktestRef = useRef(false);
+  const lastSeenBacktestTimestampRef = useRef(null);
+
   useEffect(() => {
-    // Carrega status inicial
+    // 1. Carrega dados iniciais
     supabase.from('copilot_status').select('*').eq('id', 1).single()
       .then(r => {
         if (r.data) {
           setStatus(r.data);
           if (r.data.last_backtest) {
             setLatestBacktest(r.data.last_backtest);
+            lastSeenBacktestTimestampRef.current = r.data.last_backtest.timestamp;
           }
         }
       });
@@ -39,15 +44,23 @@ export default function App() {
     supabase.from('copilot_logs').select('*').order('created_at', { ascending: false }).limit(40)
       .then(r => r.data && setLogs(r.data));
 
-    // Assina Realtime
+    // 2. Realtime Listener
     const channel = supabase.channel('copilot_realtime_sync')
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'copilot_status' }, p => {
         setStatus(p.new);
-        // Quando o robô salva o resultado do backtest no status, abre o modal na hora!
-        if (p.new.last_backtest) {
-          setLatestBacktest(p.new.last_backtest);
+        const bResult = p.new.last_backtest;
+
+        // SÓ abre o modal se o usuário estava explicitamente aguardando o resultado
+        // ou se chegou um timestamp novo diferente do anterior
+        if (bResult && bResult.timestamp && bResult.timestamp !== lastSeenBacktestTimestampRef.current) {
+          lastSeenBacktestTimestampRef.current = bResult.timestamp;
+          setLatestBacktest(bResult);
           setIsBacktestLoading(false);
-          setShowReportModal(true);
+
+          if (isAwaitingBacktestRef.current) {
+            isAwaitingBacktestRef.current = false;
+            setShowReportModal(true);
+          }
         }
       })
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'copilot_settings' }, p => {
@@ -55,6 +68,21 @@ export default function App() {
       })
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'copilot_logs' }, p => {
         setLogs(prev => [p.new, ...prev.slice(0, 45)]);
+
+        if (p.new.message && p.new.message.startsWith('BACKTEST_RESULT:')) {
+          try {
+            const parsed = JSON.parse(p.new.message.replace('BACKTEST_RESULT:', ''));
+            lastSeenBacktestTimestampRef.current = parsed.timestamp;
+            setLatestBacktest(parsed);
+            setIsBacktestLoading(false);
+
+            if (isAwaitingBacktestRef.current) {
+              isAwaitingBacktestRef.current = false;
+              setShowReportModal(true);
+            }
+          } catch {}
+        }
+
         if (soundEnabled && p.new.level === 'SUCCESS') playAlertSound();
       })
       .subscribe();
@@ -74,14 +102,22 @@ export default function App() {
   const handleRunBacktest = async (days = 2, asset = 'US100') => {
     const symbolTarget = asset === 'US100' ? 'US100.cash' : 'XAUUSD';
 
-    // Abre o modal de imediato em modo de carregamento
+    // Sinaliza que o usuário está ativamente aguardando o teste
+    isAwaitingBacktestRef.current = true;
     setIsBacktestLoading(true);
     setShowReportModal(true);
 
-    // Envia o comando direto pelo copilot_settings (100% infalível)
     await supabase.from('copilot_settings').update({
       command: `RUN_BACKTEST:${symbolTarget}:${days}`
     }).eq('id', 1);
+
+    // Timeout de segurança (caso o MT5 não responda em 15s)
+    setTimeout(() => {
+      if (isAwaitingBacktestRef.current) {
+        isAwaitingBacktestRef.current = false;
+        setIsBacktestLoading(false);
+      }
+    }, 15000);
   };
 
   const handleClearLogs = async () => {
