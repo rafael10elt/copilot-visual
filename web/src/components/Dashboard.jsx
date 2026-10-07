@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { 
   UserCheck, Power, Sparkles, BarChart3, AlertTriangle, X, 
   CheckCircle2, Trophy, ArrowRight, Loader2, Activity, Clock, 
-  Radar, Cpu, Sliders, ShieldCheck, Zap, Crosshair, TableProperties
+  Radar, Cpu, Sliders, ShieldCheck, Zap, Crosshair, TableProperties, ShieldAlert
 } from 'lucide-react';
 
 export default function Dashboard({ 
@@ -22,7 +22,7 @@ export default function Dashboard({
   const [showEmergencyModal, setShowEmergencyModal] = useState(false);
   const [selectedAsset, setSelectedAsset] = useState('US100');
   const [selectedDays, setSelectedDays] = useState(5);
-  const [backtestViewTab, setBacktestViewTab] = useState('raio_x'); // 'raio_x', 'compare'
+  const [backtestViewTab, setBacktestViewTab] = useState('raio_x');
 
   const currentRiskBase = Number(settings?.risk_per_trade || 50);
   const stats = status?.today_stats || {
@@ -298,13 +298,13 @@ export default function Dashboard({
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Sparkles size={15} className="text-amber-400" />
-            <h4 className="text-xs font-bold text-zinc-200 uppercase font-mono">Sandbox Backtest (Raio-X Geral)</h4>
+            <h4 className="text-xs font-bold text-zinc-200 uppercase font-mono">Sandbox Backtest (Expectativa Realista)</h4>
           </div>
           {latestBacktest && !isBacktestLoading && (
             <button
               onClick={() => setShowReportModal(true)}
               className="text-[10px] font-mono font-bold text-violet-400 hover:text-violet-300 underline flex items-center gap-1">
-              Abrir Raio-X <ArrowRight size={10} />
+              Abrir Relatório Realista <ArrowRight size={10} />
             </button>
           )}
         </div>
@@ -358,12 +358,12 @@ export default function Dashboard({
           {isBacktestLoading ? (
             <>
               <Loader2 size={14} className="animate-spin text-amber-400" />
-              <span>Simulando Raio-X Geral para {selectedAsset}...</span>
+              <span>Calculando Execução Real Sequencial ({selectedAsset})...</span>
             </>
           ) : (
             <>
               <BarChart3 size={14} />
-              <span>Executar Raio-X Completo ({selectedAsset} - {selectedDays}D)</span>
+              <span>Executar Backtest Realista ({selectedAsset} - {selectedDays}D)</span>
             </>
           )}
         </button>
@@ -376,7 +376,7 @@ export default function Dashboard({
         <Power size={14} /> Trava de Emergência (Zerar Tudo)
       </button>
 
-      {/* 8. MODAL DO RAIO-X INSTITUCIONAL (SEM SCROLLBAR) */}
+      {/* 8. MODAL DO RELATÓRIO REALISTA (COM FRICÇÃO DE MESA) */}
       {showReportModal && (
         <div className="fixed inset-0 bg-black/85 backdrop-blur-sm z-50 flex items-center justify-center p-2 sm:p-4">
           <div className="bg-zinc-900 border border-zinc-800 w-full max-w-xl rounded-2xl p-4 sm:p-5 shadow-2xl relative space-y-4 max-h-[92vh] overflow-y-auto no-scrollbar">
@@ -390,9 +390,9 @@ export default function Dashboard({
               <div className="py-12 flex flex-col items-center justify-center text-center space-y-3">
                 <Loader2 size={36} className="animate-spin text-amber-400" />
                 <div>
-                  <h3 className="text-sm font-bold text-zinc-100 font-mono">Processando Raio-X Geral</h3>
+                  <h3 className="text-sm font-bold text-zinc-100 font-mono">Processando Execução Realista</h3>
                   <p className="text-[11px] text-zinc-400 font-mono mt-1">
-                    Simulando todas as combinações de entrada e gestão vela a vela...
+                    Simulando 1 ordem sequencial por vez, spreads dinâmicos e comissões da mesa...
                   </p>
                 </div>
               </div>
@@ -404,12 +404,25 @@ export default function Dashboard({
                   </div>
                   <div>
                     <h3 className="text-sm font-bold text-zinc-100 font-mono uppercase">
-                      {latestBacktest.symbol} Raio-X Geral ({latestBacktest.days}D)
+                      {latestBacktest.symbol} Expectativa Realista ({latestBacktest.days}D)
                     </h3>
-                    <span className="text-[10px] text-zinc-400 font-mono">
-                      {latestBacktest.setups} Setups Históricos Mapeados • Risco Base: ${latestBacktest.base_risk || currentRiskBase}
-                    </span>
+                    <div className="flex items-center gap-2 text-[10px] text-zinc-400 font-mono mt-0.5">
+                      <span>Mapeados: <strong className="text-zinc-300">{latestBacktest.setups_mapped}</strong></span>
+                      <span>•</span>
+                      <span>Executados na Realidade: <strong className="text-emerald-400 font-bold">{latestBacktest.trades_executed}</strong></span>
+                      <span>•</span>
+                      <span>Risco: ${latestBacktest.base_risk || currentRiskBase}</span>
+                    </div>
                   </div>
+                </div>
+
+                {/* BANNER INSTITUCIONAL DE FRICÇÃO APLICADA */}
+                <div className="bg-emerald-950/20 border border-emerald-500/30 p-2.5 rounded-xl flex items-center justify-between text-[10px] font-mono text-emerald-300">
+                  <div className="flex items-center gap-2">
+                    <ShieldCheck size={16} className="text-emerald-400" />
+                    <span>Fricções Deduzidas: 1 Trade Sequencial • Spread • Slippage • Taxas FTMO</span>
+                  </div>
+                  <span className="text-[9px] bg-emerald-500/20 px-1.5 py-0.5 rounded font-bold">100% Real</span>
                 </div>
 
                 {/* TABS DO MODAL */}
@@ -419,7 +432,7 @@ export default function Dashboard({
                     className={`py-1.5 rounded-lg transition-all flex items-center justify-center gap-1.5 ${
                       backtestViewTab === 'raio_x' ? 'bg-zinc-800 text-amber-300 shadow' : 'text-zinc-500 hover:text-zinc-300'
                     }`}>
-                    <TableProperties size={13} /> Matriz Raio-X (Ranking)
+                    <TableProperties size={13} /> Matriz Realista (Ranking)
                   </button>
                   <button
                     onClick={() => setBacktestViewTab('compare')}
@@ -430,12 +443,12 @@ export default function Dashboard({
                   </button>
                 </div>
 
-                {/* TAB 1: MATRIZ DE RAIO-X COMPLETA */}
+                {/* TAB 1: MATRIZ DE RAIO-X REALISTA */}
                 {backtestViewTab === 'raio_x' && latestBacktest.raio_x && (
                   <div className="space-y-2">
                     <div className="flex items-center justify-between text-[10px] font-mono text-zinc-400 px-1">
-                      <span>Todas as Combinações Testadas:</span>
-                      <span className="text-amber-400 font-bold">Ordenado por PnL</span>
+                      <span>Projeção Líquida de Saque em Mesa:</span>
+                      <span className="text-amber-400 font-bold">Ordenado por PnL Real</span>
                     </div>
 
                     <div className="space-y-1.5 max-h-[50vh] overflow-y-auto no-scrollbar pr-1">
@@ -464,7 +477,7 @@ export default function Dashboard({
                             </div>
 
                             <div className="flex items-center gap-3 text-[10px] text-zinc-400">
-                              <span>Setups: <strong className="text-zinc-200">{item.setups}</strong></span>
+                              <span>Trades Reais: <strong className="text-zinc-200">{item.trades_executed}</strong></span>
                               <span>Win: <strong className="text-zinc-200">{item.win_rate}%</strong> ({item.wins}W / {item.losses}L)</span>
                               {item.be_count > 0 && <span>BEs: <strong className="text-zinc-300">{item.be_count}</strong></span>}
                             </div>
@@ -507,7 +520,7 @@ export default function Dashboard({
                         <div key={key} className="bg-zinc-950 p-3 rounded-xl border border-zinc-800/80 space-y-2">
                           <div className="flex items-center justify-between border-b border-zinc-800/60 pb-1">
                             <strong className={`text-xs font-mono font-bold ${color}`}>{label}</strong>
-                            <span className="text-[9px] font-mono text-zinc-500">Comparação R:R</span>
+                            <span className="text-[9px] font-mono text-zinc-500">Projeção com Fricção</span>
                           </div>
 
                           <div className="grid grid-cols-2 gap-2 text-[10px] font-mono">
@@ -539,7 +552,7 @@ export default function Dashboard({
                 {/* DIRETIVA CAMPEÃ */}
                 <div className="bg-zinc-950 p-3 rounded-xl border border-zinc-800/80 flex items-center justify-between">
                   <div className="min-w-0 flex-1 pr-2">
-                    <span className="text-[9px] text-zinc-500 font-mono uppercase block">Melhor Estrutura Global</span>
+                    <span className="text-[9px] text-zinc-500 font-mono uppercase block">Melhor Estrutura Realista</span>
                     <strong className="text-xs font-bold text-amber-300 font-mono block truncate">
                       {latestBacktest.recommended}
                     </strong>

@@ -1,4 +1,4 @@
-# main.py — Orquestrador HFT com Raio-X Geral de Estratégias e Backtest Cronológico
+# main.py — Orquestrador HFT com Backtest de Expectativa Realista (Execução Sequencial + Fricção)
 import time
 import json
 from datetime import datetime, timedelta
@@ -227,6 +227,12 @@ def get_today_performance(risk_base=50.0):
         }
 
 def run_recent_backtest(engine, symbol, days=5, risk_per_trade=50.0):
+    """
+    MOTOR DE EXPECTATIVA REALISTA (REAL-WORLD SEQUENTIAL BACKTEST):
+    1. Execução Sequencial Estrita: 1 trade por vez (sem posições sobrepostas).
+    2. Fricção de Spread Real + Slippage (deslizamento de execução).
+    3. Dedução de Comissões de Mesa Proprietária.
+    """
     if not symbol: return None
     total_m5 = int(days) * 240
     total_m1 = int(days) * 1440
@@ -240,10 +246,16 @@ def run_recent_backtest(engine, symbol, days=5, risk_per_trade=50.0):
     min_stop_points = 5.0 if is_nasdaq else 1.2
     max_risk = 30.0 if is_nasdaq else 4.5
 
+    # Parâmetros de Fricção Real da Corretora / Mesa
+    info = mt5.symbol_info(symbol)
+    point = info.point if info else 0.01
+    spread_pts = (info.spread * point) if (info and info.spread > 0) else (1.5 if is_nasdaq else 0.25)
+    slippage_pts = 0.8 if is_nasdaq else 0.15
+    commission_r = 0.04  # ~4% do risco gasto em taxa de corretagem round-turn
+
     detector = FVGDetector()
     vision = VisionLiquidityAnalyzer()
     
-    # Coleta TODOS os setups cronológicos formados nos 5 dias
     all_fvgs = detector.find_all_historical_fvgs(df_m5, symbol)
 
     m1_highs = df_m1['high'].values
@@ -261,71 +273,130 @@ def run_recent_backtest(engine, symbol, days=5, risk_per_trade=50.0):
             for prof_key, mult, prof_label in profiles:
                 for with_be in [True, False]:
                     wins, losses, be_count = 0, 0, 0
-                    setups_count = 0
+                    setups_mapped = 0
+                    trades_executed = 0
+
+                    # Trava Sequencial de Posição Única: índice em M1 até onde o bot está ocupado
+                    bot_busy_until_m1_idx = -1
 
                     for f in all_fvgs:
                         if req_sweep and not f['has_sweep']:
                             continue
 
                         direction = "BUY" if f['type'] == 'BULLISH' else "SELL"
-                        entry = f['ce_50'] if use_ce_50 else (f['top'] if direction == "BUY" else f['bottom'])
+                        raw_entry = f['ce_50'] if use_ce_50 else (f['top'] if direction == "BUY" else f['bottom'])
 
-                        raw_dist = abs(entry - (f['bottom'] if direction == "BUY" else f['top']))
+                        raw_dist = abs(raw_entry - (f['bottom'] if direction == "BUY" else f['top']))
                         risk = min(max(raw_dist + (1.2 if is_nasdaq else 0.4), min_stop_points), max_risk)
 
-                        tp = entry + (risk * mult) if direction == "BUY" else entry - (risk * mult)
-                        sl = entry - risk if direction == "BUY" else entry + risk
+                        # Preços base
+                        tp = raw_entry + (risk * mult) if direction == "BUY" else raw_entry - (risk * mult)
+                        sl = raw_entry - risk if direction == "BUY" else raw_entry + risk
 
-                        # Contexto histórico pontual (sem viés de olhar o futuro)
+                        # Validação de visão computacional pontual
                         f_idx = f['index']
                         df_context = df_m5.iloc[:f_idx+1]
-                        path_ok, _ = vision.validate_liquidity_path(df_context, direction, entry, tp)
+                        path_ok, _ = vision.validate_liquidity_path(df_context, direction, raw_entry, tp)
                         if not path_ok:
                             continue
 
+                        setups_mapped += 1
+
+                        # Acha o candle M1 imediatamente posterior à confirmação do setup
                         start_idx = 0
                         for idx in range(len(m1_times)):
                             if m1_times[idx] >= f['raw_time']:
                                 start_idx = idx + 1
                                 break
 
-                        if start_idx == 0 or start_idx >= len(m1_times): continue
-                        setups_count += 1
+                        if start_idx == 0 or start_idx >= len(m1_times): 
+                            continue
 
-                        sim_slice_h = m1_highs[start_idx : min(start_idx + 120, len(m1_highs))]
-                        sim_slice_l = m1_lows[start_idx : min(start_idx + 120, len(m1_lows))]
+                        # TRAVA SEQUENCIAL: se o robô já estava operando um trade nesse minuto, PULA!
+                        if start_idx <= bot_busy_until_m1_idx:
+                            continue
+
+                        # Janela de simulação: máximo 120 candles M1 (2 horas)
+                        max_sim_idx = min(start_idx + 120, len(m1_highs))
+                        sim_slice_h = m1_highs[start_idx : max_sim_idx]
+                        sim_slice_l = m1_lows[start_idx : max_sim_idx]
 
                         triggered = False
                         win, loss, hit_be = False, False, False
+                        trade_resolved_idx = start_idx
 
-                        for h, l in zip(sim_slice_h, sim_slice_l):
+                        # FRICÇÃO DE SPREAD E SLIPPAGE NA ENTRADA E ALVOS
+                        if direction == "BUY":
+                            effective_entry = raw_entry + spread_pts + slippage_pts
+                            effective_tp = tp  # sai no Bid
+                            effective_sl = sl  # sai no Bid
+                        else:
+                            effective_entry = raw_entry - slippage_pts
+                            effective_tp = tp + spread_pts  # sai no Ask
+                            effective_sl = sl + spread_pts  # sai no Ask
+
+                        for step, (h, l) in enumerate(zip(sim_slice_h, sim_slice_l)):
+                            current_m1_idx = start_idx + step
+
                             if not triggered:
-                                if direction == "BUY" and l <= entry: triggered = True
-                                elif direction == "SELL" and h >= entry: triggered = True
-                                if not triggered: continue
+                                if direction == "BUY" and l <= raw_entry: 
+                                    triggered = True
+                                elif direction == "SELL" and h >= raw_entry: 
+                                    triggered = True
+                                if not triggered: 
+                                    continue
 
+                            # Lógica Break-Even com spread
                             if with_be and not hit_be:
-                                if direction == "BUY" and h >= (entry + risk * 1.2): hit_be = True
-                                elif direction == "SELL" and l <= (entry - risk * 1.2): hit_be = True
+                                if direction == "BUY" and h >= (effective_entry + risk * 1.2): 
+                                    hit_be = True
+                                elif direction == "SELL" and l <= (effective_entry - risk * 1.2): 
+                                    hit_be = True
 
                             if direction == "BUY":
-                                if hit_be and l <= entry: break
-                                elif not hit_be and l <= sl: loss = True; break
-                                elif h >= tp: win = True; break
+                                if hit_be and l <= effective_entry:
+                                    trade_resolved_idx = current_m1_idx
+                                    break
+                                elif not hit_be and l <= effective_sl:
+                                    loss = True
+                                    trade_resolved_idx = current_m1_idx
+                                    break
+                                elif h >= effective_tp:
+                                    win = True
+                                    trade_resolved_idx = current_m1_idx
+                                    break
                             else:
-                                if hit_be and h >= entry: break
-                                elif not hit_be and h >= sl: loss = True; break
-                                elif l <= tp: win = True; break
+                                if hit_be and h >= effective_entry:
+                                    trade_resolved_idx = current_m1_idx
+                                    break
+                                elif not hit_be and h >= effective_sl:
+                                    loss = True
+                                    trade_resolved_idx = current_m1_idx
+                                    break
+                                elif l <= effective_tp:
+                                    win = True
+                                    trade_resolved_idx = current_m1_idx
+                                    break
 
                         if triggered:
+                            trades_executed += 1
+                            # O robô fica ocupado até o minuto que o trade resolveu
+                            bot_busy_until_m1_idx = trade_resolved_idx
+
                             if win: wins += 1
                             elif loss: losses += 1
                             elif hit_be and not win: be_count += 1
 
                     total_resolved = wins + losses
                     win_rate = int((wins / total_resolved) * 100) if total_resolved > 0 else 0
-                    net_r = round((wins * mult) - (losses * 1.0), 1)
-                    pnl = round(net_r * risk_per_trade, 2)
+
+                    # CÁLCULO FINANCEIRO REALISTA COM COMISSÕES
+                    # Win: ganha R líquido da taxa | Loss: perde 1R + taxa | BE: perde taxa de corretagem
+                    net_r_raw = (wins * mult) - (losses * 1.0)
+                    total_deals = wins + losses + be_count
+                    total_commissions_r = total_deals * commission_r
+                    net_r_realistic = round(net_r_raw - total_commissions_r, 1)
+                    pnl_realistic = round(net_r_realistic * risk_per_trade, 2)
 
                     raio_x_results.append({
                         "id": f"{entry_label}_{sweep_label}_{prof_key}_{'BE' if with_be else 'NOBE'}",
@@ -335,13 +406,14 @@ def run_recent_backtest(engine, symbol, days=5, risk_per_trade=50.0):
                         "profile_key": prof_key,
                         "with_be": with_be,
                         "be_label": "Com BE" if with_be else "Sem BE",
-                        "setups": setups_count,
+                        "setups_mapped": setups_mapped,
+                        "trades_executed": trades_executed,
                         "wins": wins,
                         "losses": losses,
                         "be_count": be_count,
                         "win_rate": win_rate,
-                        "net_r": net_r,
-                        "pnl": pnl
+                        "net_r": net_r_realistic,
+                        "pnl": pnl_realistic
                     })
 
     raio_x_results.sort(key=lambda x: (x['pnl'], x['win_rate']), reverse=True)
@@ -361,12 +433,13 @@ def run_recent_backtest(engine, symbol, days=5, risk_per_trade=50.0):
         "timestamp": int(time.time()),
         "symbol": symbol,
         "days": days,
-        "setups": len(all_fvgs),
+        "setups_mapped": len(all_fvgs),
+        "trades_executed": best['trades_executed'] if best else 0,
         "base_risk": risk_per_trade,
         "strategy_info": {
-            "entry": "Raio-X Matricial Completo",
-            "sessions": "Histórico Real (5 Dias)",
-            "cv_filter": "Filtro de Absorção Dinâmico"
+            "mode": "Execução Sequencial (1 Trade por Vez)",
+            "frictions": f"Spread ({spread_pts:.2f}) + Slippage + Comissões",
+            "context": f"Histórico Real {days}D"
         },
         "raio_x": raio_x_results,
         "with_be": get_subset(use_ce=True, be=True),
@@ -400,7 +473,7 @@ def main():
     active_mode = "BOTH"
     cached_settings = {}
 
-    sync.add_log(None, "Motor conectado com Raio-X Geral e Backtest Cronológico.", "INFO")
+    sync.add_log(None, "Motor conectado com Backtest de Expectativa Realista.", "INFO")
 
     try:
         while True:
