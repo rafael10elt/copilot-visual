@@ -1,13 +1,24 @@
-import React from 'react';
-import { ShieldCheck, DollarSign, Power, Sparkles, UserCheck } from 'lucide-react';
+import React, { useState } from 'react';
+import { UserCheck, DollarSign, Power, Sparkles, BarChart3, AlertTriangle, X } from 'lucide-react';
 
-export default function Dashboard({ status, settings, onEmergencyStop }) {
+export default function Dashboard({ status, settings, onEmergencyStop, onRunBacktest }) {
   const isOnline = status?.is_online;
   const pnl = Number(status?.pnl_today || 0);
 
+  const [showEmergencyModal, setShowEmergencyModal] = useState(false);
+  const [selectedAsset, setSelectedAsset] = useState('US100'); // 'US100' ou 'XAUUSD'
+  const [selectedDays, setSelectedDays] = useState(2);        // 1, 2, 3 ou 5
+  const [isRunningBacktest, setIsRunningBacktest] = useState(false);
+
+  const handleBacktestClick = async () => {
+    setIsRunningBacktest(true);
+    await onRunBacktest(selectedDays, selectedAsset);
+    setTimeout(() => setIsRunningBacktest(false), 3000);
+  };
+
   return (
-    <div className="space-y-3.5">
-      {/* CARD DA CONTA FTMO */}
+    <div className="space-y-3.5 relative">
+      {/* CARD CONTA FTMO */}
       <div className="bg-zinc-900/90 border border-zinc-800 p-4 rounded-2xl flex items-center justify-between">
         <div className="flex items-center gap-3">
           <div className="p-2.5 rounded-xl bg-violet-500/10 border border-violet-500/20 text-violet-400">
@@ -22,44 +33,141 @@ export default function Dashboard({ status, settings, onEmergencyStop }) {
           </div>
         </div>
         <div className="text-right">
-          <span className="text-[10px] text-zinc-500 font-mono block">PATRIMÔNIO (EQUITY)</span>
+          <span className="text-[10px] text-zinc-500 font-mono block">EQUITY</span>
           <strong className="text-sm font-black text-zinc-100 font-mono">${status?.account_equity || '0.00'}</strong>
         </div>
       </div>
 
-      {/* PLACAR PNL HOJE & SALDO */}
+      {/* PLACAR PNL & SALDO */}
       <div className="grid grid-cols-2 gap-3">
         <div className="bg-zinc-900/90 border border-zinc-800 p-3.5 rounded-2xl">
-          <span className="text-[10px] font-mono text-zinc-500 uppercase block">Saldo da Conta</span>
+          <span className="text-[10px] font-mono text-zinc-500 uppercase block">Account Balance</span>
           <strong className="text-base font-bold text-zinc-200 font-mono block mt-1">
             ${status?.account_balance || '0.00'}
           </strong>
         </div>
 
         <div className="bg-zinc-900/90 border border-zinc-800 p-3.5 rounded-2xl">
-          <span className="text-[10px] font-mono text-zinc-500 uppercase block">PNL da Sessão</span>
+          <span className="text-[10px] font-mono text-zinc-500 uppercase block">Session PNL</span>
           <strong className={`text-base font-black font-mono block mt-1 ${pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
             {pnl >= 0 ? `+$${pnl.toFixed(2)}` : `-$${Math.abs(pnl).toFixed(2)}`}
           </strong>
         </div>
       </div>
 
-      {/* SHADOW TRADING & EMERGÊNCIA */}
-      <div className="bg-gradient-to-br from-zinc-900 to-zinc-950 border border-zinc-800/80 p-3.5 rounded-2xl">
-        <div className="flex items-center gap-2 mb-1.5">
-          <Sparkles size={15} className="text-amber-400" />
-          <h4 className="text-xs font-bold text-zinc-200 uppercase font-mono">Shadow Trading</h4>
+      {/* SANDBOX / BACKTEST CUSTOMIZÁVEL */}
+      <div className="bg-gradient-to-br from-zinc-900 to-zinc-950 border border-zinc-800/80 p-4 rounded-2xl space-y-3">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Sparkles size={15} className="text-amber-400" />
+            <h4 className="text-xs font-bold text-zinc-200 uppercase font-mono">Sandbox Backtest</h4>
+          </div>
+          <span className="text-[10px] text-zinc-500 font-mono">Pre-Session Calibration</span>
         </div>
-        <p className="text-[11px] text-zinc-400 leading-relaxed font-sans">
-          Simulando os perfis não utilizados. No final da sessão você verá qual teria gerado o melhor lucro.
-        </p>
+
+        {/* 1. SELETOR DE ATIVO DO BACKTEST */}
+        <div>
+          <span className="text-[10px] font-mono text-zinc-400 block mb-1.5 uppercase">Target Asset</span>
+          <div className="grid grid-cols-2 gap-2">
+            <button
+              onClick={() => setSelectedAsset('US100')}
+              className={`py-1.5 rounded-xl text-xs font-mono font-bold border transition-all ${
+                selectedAsset === 'US100'
+                  ? 'bg-violet-500/10 border-violet-500/40 text-violet-300'
+                  : 'bg-zinc-950 border-zinc-800/80 text-zinc-500 hover:text-zinc-300'
+              }`}>
+              NASDAQ (US100)
+            </button>
+            <button
+              onClick={() => setSelectedAsset('XAUUSD')}
+              className={`py-1.5 rounded-xl text-xs font-mono font-bold border transition-all ${
+                selectedAsset === 'XAUUSD'
+                  ? 'bg-amber-500/10 border-amber-500/40 text-amber-300'
+                  : 'bg-zinc-950 border-zinc-800/80 text-zinc-500 hover:text-zinc-300'
+              }`}>
+              GOLD (XAUUSD)
+            </button>
+          </div>
+        </div>
+
+        {/* 2. SELETOR DE DIAS (PILLS) */}
+        <div>
+          <span className="text-[10px] font-mono text-zinc-400 block mb-1.5 uppercase">Lookback Window</span>
+          <div className="grid grid-cols-4 gap-1.5">
+            {[1, 2, 3, 5].map((d) => (
+              <button
+                key={d}
+                onClick={() => setSelectedDays(d)}
+                className={`py-1 rounded-lg text-xs font-mono font-bold border transition-all ${
+                  selectedDays === d
+                    ? 'bg-emerald-500/10 border-emerald-500/40 text-emerald-300'
+                    : 'bg-zinc-950 border-zinc-800/80 text-zinc-500 hover:text-zinc-300'
+                }`}>
+                {d}D
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* BOTÃO DE DISPARO */}
+        <button
+          onClick={handleBacktestClick}
+          disabled={isRunningBacktest}
+          className="w-full py-2.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-xs font-mono font-bold text-amber-300 border border-zinc-700 transition-all flex items-center justify-center gap-2 shadow-lg">
+          <BarChart3 size={14} />
+          {isRunningBacktest ? `Analyzing ${selectedAsset} (${selectedDays}D)...` : `Run ${selectedAsset} Backtest (${selectedDays}D)`}
+        </button>
       </div>
 
+      {/* BOTÃO TRAVA DE EMERGÊNCIA */}
       <button
-        onClick={onEmergencyStop}
+        onClick={() => setShowEmergencyModal(true)}
         className="w-full py-3 bg-rose-950/40 hover:bg-rose-900/60 border border-rose-800/60 text-rose-300 rounded-xl text-xs font-bold font-mono uppercase tracking-wider flex items-center justify-center gap-2 transition-all">
-        <Power size={14} /> Trava de Emergência (Zerar)
+        <Power size={14} /> Emergency Stop (Flatten & Cancel)
       </button>
+
+      {/* MODAL LIMPO DE EMERGÊNCIA */}
+      {showEmergencyModal && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-zinc-900 border border-zinc-800 w-full max-w-sm rounded-2xl p-5 shadow-2xl relative animate-in fade-in zoom-in-95 duration-150">
+            <button
+              onClick={() => setShowEmergencyModal(false)}
+              className="absolute top-4 right-4 text-zinc-500 hover:text-zinc-200">
+              <X size={18} />
+            </button>
+
+            <div className="flex items-center gap-3 mb-3">
+              <div className="p-2.5 bg-rose-500/10 border border-rose-500/20 text-rose-400 rounded-xl">
+                <AlertTriangle size={22} />
+              </div>
+              <div>
+                <h3 className="text-sm font-bold text-zinc-100 font-mono">Emergency Stop</h3>
+                <span className="text-[10px] text-zinc-400 font-mono">Immediate execution</span>
+              </div>
+            </div>
+
+            <p className="text-xs text-zinc-300 mb-5 leading-relaxed bg-zinc-950/60 p-3 rounded-xl border border-zinc-800/60">
+              This will immediately cancel all pending orders and close all open positions on MetaTrader 5.
+            </p>
+
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                onClick={() => setShowEmergencyModal(false)}
+                className="py-2.5 rounded-xl border border-zinc-800 bg-zinc-800/60 hover:bg-zinc-800 text-xs font-bold text-zinc-300">
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  setShowEmergencyModal(false);
+                  onEmergencyStop();
+                }}
+                className="py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-xs font-bold text-white shadow-lg shadow-rose-900/50">
+                Confirm
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

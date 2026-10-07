@@ -5,19 +5,17 @@ import Dashboard from './components/Dashboard';
 import ControlPanel from './components/ControlPanel';
 import LiveLogs from './components/LiveLogs';
 
-// Conexão com o Supabase
 const SUPABASE_URL = "https://wvyllpbqtahxrqsjjzgp.supabase.co";
 const SUPABASE_ANON = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Ind2eWxscGJxdGFoeHJxc2pqemdwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTEyMzU3NzEsImV4cCI6MjEwNjgxMTc3MX0.7qIsu2oZermD9uPA8ggSfNZuKDZH-_ifs2jJjeTX6XM";
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON);
 
 export default function App() {
-  const [tab, setTab] = useState('dashboard'); // dashboard | controls | logs
+  const [tab, setTab] = useState('dashboard');
   const [status, setStatus] = useState({ is_online: false, pnl_today: 0, current_profile: 'tatico' });
   const [settings, setSettings] = useState(null);
   const [logs, setLogs] = useState([]);
   const [soundEnabled, setSoundEnabled] = useState(false);
 
-  // Carregar dados iniciais e assinar Realtime
   useEffect(() => {
     supabase.from('copilot_status').select('*').eq('id', 1).single()
       .then(r => r.data && setStatus(r.data));
@@ -28,40 +26,37 @@ export default function App() {
     supabase.from('copilot_logs').select('*').order('created_at', { ascending: false }).limit(40)
       .then(r => r.data && setLogs(r.data));
 
-    // Canal Realtime para escutar o notebook
     const channel = supabase.channel('copilot_realtime_sync')
-      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'copilot_status' }, p => {
-        setStatus(p.new);
-      })
-      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'copilot_settings' }, p => {
-        setSettings(p.new);
-      })
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'copilot_status' }, p => setStatus(p.new))
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'copilot_settings' }, p => setSettings(p.new))
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'copilot_logs' }, p => {
-        setLogs(prev => [p.new, ...prev.slice(0, 50)]);
-        if (soundEnabled && p.new.level === 'SUCCESS') {
-          playAlertSound();
-        }
+        setLogs(prev => [p.new, ...prev.slice(0, 45)]);
+        if (soundEnabled && p.new.level === 'SUCCESS') playAlertSound();
       })
       .subscribe();
 
-    return () => {
-      supabase.removeChannel(channel);
-    };
+    return () => supabase.removeChannel(channel);
   }, [soundEnabled]);
 
-  // Atualizar configurações a partir do celular
   const handleUpdateSettings = async (newFields) => {
     setSettings(prev => ({ ...prev, ...newFields }));
     await supabase.from('copilot_settings').update(newFields).eq('id', 1);
   };
 
   const handleEmergencyStop = async () => {
-    if (confirm("Deseja ativar a trava de emergência?")) {
-      await supabase.from('copilot_logs').insert({
-        message: "🚨 TRAVA DE EMERGÊNCIA DISPARADA PELO CELULAR",
-        level: "DANGER"
-      });
-    }
+    await supabase.from('copilot_logs').insert({
+      message: "EMERGENCY_STOP_TRIGGERED: Cancelling orders and flattening positions",
+      level: "DANGER"
+    });
+  };
+
+  const handleRunBacktest = async (days = 2, asset = 'US100') => {
+    const symbolTarget = asset === 'US100' ? 'US100.cash' : 'XAUUSD';
+    await supabase.from('copilot_logs').insert({
+      symbol: symbolTarget,
+      message: `COMMAND: RUN_BACKTEST:${symbolTarget}:${days}`,
+      level: "INFO"
+    });
   };
 
   const handleClearLogs = async () => {
@@ -86,8 +81,6 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100 flex flex-col items-center p-3 sm:p-6 antialiased select-none font-sans">
-      
-      {/* HEADER COMPACTO */}
       <header className="w-full max-w-md bg-zinc-900/90 border border-zinc-800 rounded-2xl p-3.5 mb-3 flex items-center justify-between shadow-xl">
         <div className="flex items-center gap-2.5">
           <div className="p-2 bg-violet-500/10 border border-violet-500/20 text-violet-400 rounded-xl">
@@ -102,32 +95,27 @@ export default function App() {
         <button
           onClick={() => setSoundEnabled(!soundEnabled)}
           className={`p-2 rounded-xl border transition-colors ${
-            soundEnabled 
-              ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' 
-              : 'bg-zinc-800 text-zinc-400 border-zinc-700'
+            soundEnabled ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' : 'bg-zinc-800 text-zinc-400 border-zinc-700'
           }`}>
           {soundEnabled ? <Volume2 size={16} /> : <VolumeX size={16} />}
         </button>
       </header>
 
-      {/* NAVEGAÇÃO DE ABAS */}
       <nav className="w-full max-w-md grid grid-cols-3 gap-1.5 p-1 bg-zinc-900 border border-zinc-800 rounded-xl mb-4 text-xs font-bold font-mono">
         <button
           onClick={() => setTab('dashboard')}
           className={`py-2 rounded-lg flex items-center justify-center gap-1.5 transition-all ${
             tab === 'dashboard' ? 'bg-zinc-800 text-zinc-100 shadow' : 'text-zinc-500 hover:text-zinc-300'
           }`}>
-          <LayoutDashboard size={14} /> Visão
+          <LayoutDashboard size={14} /> Overview
         </button>
-
         <button
           onClick={() => setTab('controls')}
           className={`py-2 rounded-lg flex items-center justify-center gap-1.5 transition-all ${
             tab === 'controls' ? 'bg-zinc-800 text-zinc-100 shadow' : 'text-zinc-500 hover:text-zinc-300'
           }`}>
-          <Sliders size={14} /> Perfis
+          <Sliders size={14} /> Profiles
         </button>
-
         <button
           onClick={() => setTab('logs')}
           className={`py-2 rounded-lg flex items-center justify-center gap-1.5 transition-all ${
@@ -137,23 +125,21 @@ export default function App() {
         </button>
       </nav>
 
-      {/* CONTEÚDO PRINCIPAL (MOBILE FIRST) */}
       <main className="w-full max-w-md flex-1">
         {tab === 'dashboard' && (
           <Dashboard
             status={status}
             settings={settings}
             onEmergencyStop={handleEmergencyStop}
+            onRunBacktest={handleRunBacktest}
           />
         )}
-
         {tab === 'controls' && (
           <ControlPanel
             settings={settings}
             onUpdateSettings={handleUpdateSettings}
           />
         )}
-
         {tab === 'logs' && (
           <LiveLogs
             logs={logs}
@@ -161,7 +147,6 @@ export default function App() {
           />
         )}
       </main>
-
     </div>
   );
 }
