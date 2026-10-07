@@ -1,0 +1,5 @@
+MetaTrader5
+supabase
+groq
+pandas
+python-dotenv
