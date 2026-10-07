@@ -1,25 +1,40 @@
 import React, { useState } from 'react';
-import { UserCheck, DollarSign, Power, Sparkles, BarChart3, AlertTriangle, X } from 'lucide-react';
+import { UserCheck, Power, Sparkles, BarChart3, AlertTriangle, X, CheckCircle2, Trophy, ArrowRight } from 'lucide-react';
 
-export default function Dashboard({ status, settings, onEmergencyStop, onRunBacktest }) {
+export default function Dashboard({ 
+  status, 
+  settings, 
+  onEmergencyStop, 
+  onRunBacktest, 
+  onUpdateSettings,
+  latestBacktest,
+  showReportModal,
+  setShowReportModal
+}) {
   const isOnline = status?.is_online;
   const pnl = Number(status?.pnl_today || 0);
 
   const [showEmergencyModal, setShowEmergencyModal] = useState(false);
-  const [selectedAsset, setSelectedAsset] = useState('US100'); // 'US100' ou 'XAUUSD'
-  const [selectedDays, setSelectedDays] = useState(2);        // 1, 2, 3 ou 5
+  const [selectedAsset, setSelectedAsset] = useState('US100');
+  const [selectedDays, setSelectedDays] = useState(2);
   const [isRunningBacktest, setIsRunningBacktest] = useState(false);
 
   const handleBacktestClick = async () => {
     setIsRunningBacktest(true);
     await onRunBacktest(selectedDays, selectedAsset);
-    setTimeout(() => setIsRunningBacktest(false), 3000);
+    setTimeout(() => setIsRunningBacktest(false), 2500);
+  };
+
+  const applyRecommendedProfile = (recommended) => {
+    const profileKey = recommended === 'GUARDIAN' ? 'guardiao' : recommended === 'SNIPER' ? 'sniper' : 'tatico';
+    onUpdateSettings({ profile: profileKey });
+    setShowReportModal(false);
   };
 
   return (
     <div className="space-y-3.5 relative">
       {/* CARD CONTA FTMO */}
-      <div className="bg-zinc-900/90 border border-zinc-800 p-4 rounded-2xl flex items-center justify-between">
+      <div className="bg-zinc-900/90 border border-zinc-800 p-4 rounded-2xl flex items-center justify-between shadow-xl">
         <div className="flex items-center gap-3">
           <div className="p-2.5 rounded-xl bg-violet-500/10 border border-violet-500/20 text-violet-400">
             <UserCheck size={20} />
@@ -40,14 +55,14 @@ export default function Dashboard({ status, settings, onEmergencyStop, onRunBack
 
       {/* PLACAR PNL & SALDO */}
       <div className="grid grid-cols-2 gap-3">
-        <div className="bg-zinc-900/90 border border-zinc-800 p-3.5 rounded-2xl">
+        <div className="bg-zinc-900/90 border border-zinc-800 p-3.5 rounded-2xl shadow-lg">
           <span className="text-[10px] font-mono text-zinc-500 uppercase block">Account Balance</span>
           <strong className="text-base font-bold text-zinc-200 font-mono block mt-1">
             ${status?.account_balance || '0.00'}
           </strong>
         </div>
 
-        <div className="bg-zinc-900/90 border border-zinc-800 p-3.5 rounded-2xl">
+        <div className="bg-zinc-900/90 border border-zinc-800 p-3.5 rounded-2xl shadow-lg">
           <span className="text-[10px] font-mono text-zinc-500 uppercase block">Session PNL</span>
           <strong className={`text-base font-black font-mono block mt-1 ${pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
             {pnl >= 0 ? `+$${pnl.toFixed(2)}` : `-$${Math.abs(pnl).toFixed(2)}`}
@@ -56,16 +71,22 @@ export default function Dashboard({ status, settings, onEmergencyStop, onRunBack
       </div>
 
       {/* SANDBOX / BACKTEST CUSTOMIZÁVEL */}
-      <div className="bg-gradient-to-br from-zinc-900 to-zinc-950 border border-zinc-800/80 p-4 rounded-2xl space-y-3">
+      <div className="bg-gradient-to-br from-zinc-900 to-zinc-950 border border-zinc-800/80 p-4 rounded-2xl space-y-3 shadow-xl">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Sparkles size={15} className="text-amber-400" />
             <h4 className="text-xs font-bold text-zinc-200 uppercase font-mono">Sandbox Backtest</h4>
           </div>
-          <span className="text-[10px] text-zinc-500 font-mono">Pre-Session Calibration</span>
+          {latestBacktest && (
+            <button
+              onClick={() => setShowReportModal(true)}
+              className="text-[10px] font-mono font-bold text-violet-400 hover:text-violet-300 underline flex items-center gap-1">
+              View Latest Report <ArrowRight size={10} />
+            </button>
+          )}
         </div>
 
-        {/* 1. SELETOR DE ATIVO DO BACKTEST */}
+        {/* 1. SELETOR DE ATIVO */}
         <div>
           <span className="text-[10px] font-mono text-zinc-400 block mb-1.5 uppercase">Target Asset</span>
           <div className="grid grid-cols-2 gap-2">
@@ -90,7 +111,7 @@ export default function Dashboard({ status, settings, onEmergencyStop, onRunBack
           </div>
         </div>
 
-        {/* 2. SELETOR DE DIAS (PILLS) */}
+        {/* 2. SELETOR DE DIAS */}
         <div>
           <span className="text-[10px] font-mono text-zinc-400 block mb-1.5 uppercase">Lookback Window</span>
           <div className="grid grid-cols-4 gap-1.5">
@@ -109,7 +130,7 @@ export default function Dashboard({ status, settings, onEmergencyStop, onRunBack
           </div>
         </div>
 
-        {/* BOTÃO DE DISPARO */}
+        {/* BOTÃO DISPARADOR */}
         <button
           onClick={handleBacktestClick}
           disabled={isRunningBacktest}
@@ -126,7 +147,99 @@ export default function Dashboard({ status, settings, onEmergencyStop, onRunBack
         <Power size={14} /> Emergency Stop (Flatten & Cancel)
       </button>
 
-      {/* MODAL LIMPO DE EMERGÊNCIA */}
+      {/* MODAL 1: RELATÓRIO DO BACKTEST (ELEGANTE E DETALHADO) */}
+      {showReportModal && latestBacktest && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-zinc-900 border border-zinc-800 w-full max-w-sm rounded-2xl p-5 shadow-2xl relative animate-in fade-in zoom-in-95 duration-150 space-y-4">
+            <button
+              onClick={() => setShowReportModal(false)}
+              className="absolute top-4 right-4 text-zinc-500 hover:text-zinc-200">
+              <X size={18} />
+            </button>
+
+            {/* Cabeçalho */}
+            <div className="flex items-center gap-3">
+              <div className="p-2.5 bg-amber-500/10 border border-amber-500/20 text-amber-400 rounded-xl">
+                <Trophy size={22} />
+              </div>
+              <div>
+                <h3 className="text-sm font-bold text-zinc-100 font-mono uppercase">
+                  {latestBacktest.symbol} Backtest
+                </h3>
+                <span className="text-[10px] text-zinc-400 font-mono">
+                  {latestBacktest.days} Days Window • {latestBacktest.setups} Setups Formed
+                </span>
+              </div>
+            </div>
+
+            {/* Placar dos 3 Perfis */}
+            <div className="space-y-2">
+              {/* SNIPER */}
+              <div className={`p-2.5 rounded-xl border flex items-center justify-between ${
+                latestBacktest.recommended === 'SNIPER'
+                  ? 'bg-amber-500/10 border-amber-500/40'
+                  : 'bg-zinc-950 border-zinc-800/70'
+              }`}>
+                <div>
+                  <strong className="text-xs font-bold font-mono text-zinc-200 block">SNIPER (1:4 R:R)</strong>
+                  <span className="text-[9px] text-zinc-500 font-mono">Tight SL • Long expansion target</span>
+                </div>
+                <div className="text-right">
+                  <span className="text-sm font-black font-mono text-amber-300">{latestBacktest.sniper_rate}%</span>
+                  <span className="text-[9px] text-zinc-500 block font-mono">Win Rate</span>
+                </div>
+              </div>
+
+              {/* TACTICAL */}
+              <div className={`p-2.5 rounded-xl border flex items-center justify-between ${
+                latestBacktest.recommended === 'TACTICAL'
+                  ? 'bg-blue-500/10 border-blue-500/40'
+                  : 'bg-zinc-950 border-zinc-800/70'
+              }`}>
+                <div>
+                  <strong className="text-xs font-bold font-mono text-zinc-200 block">TACTICAL (1:2.5 R:R)</strong>
+                  <span className="text-[9px] text-zinc-500 font-mono">Balanced SL • Medium target</span>
+                </div>
+                <div className="text-right">
+                  <span className="text-sm font-black font-mono text-blue-300">{latestBacktest.tatico_rate}%</span>
+                  <span className="text-[9px] text-zinc-500 block font-mono">Win Rate</span>
+                </div>
+              </div>
+
+              {/* GUARDIAN */}
+              <div className={`p-2.5 rounded-xl border flex items-center justify-between ${
+                latestBacktest.recommended === 'GUARDIAN'
+                  ? 'bg-emerald-500/10 border-emerald-500/40'
+                  : 'bg-zinc-950 border-zinc-800/70'
+              }`}>
+                <div>
+                  <strong className="text-xs font-bold font-mono text-zinc-200 block">GUARDIAN (1:1.5 R:R)</strong>
+                  <span className="text-[9px] text-zinc-500 font-mono">Wide ATR SL • High hit rate</span>
+                </div>
+                <div className="text-right">
+                  <span className="text-sm font-black font-mono text-emerald-300">{latestBacktest.guardiao_rate}%</span>
+                  <span className="text-[9px] text-zinc-500 block font-mono">Win Rate</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Sugestão de Perfil */}
+            <div className="bg-zinc-950 p-3 rounded-xl border border-zinc-800/80 flex items-center justify-between">
+              <div>
+                <span className="text-[10px] text-zinc-500 font-mono uppercase block">Recommended Profile</span>
+                <strong className="text-xs font-bold text-emerald-400 font-mono">{latestBacktest.recommended}</strong>
+              </div>
+              <button
+                onClick={() => applyRecommendedProfile(latestBacktest.recommended)}
+                className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-bold font-mono transition-all flex items-center gap-1 shadow-md">
+                <CheckCircle2 size={13} /> Apply Profile
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL 2: EMERGÊNCIA */}
       {showEmergencyModal && (
         <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-zinc-900 border border-zinc-800 w-full max-w-sm rounded-2xl p-5 shadow-2xl relative animate-in fade-in zoom-in-95 duration-150">

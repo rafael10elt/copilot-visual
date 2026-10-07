@@ -1,4 +1,5 @@
 import time
+import json
 import MetaTrader5 as mt5
 from mt5_core import MT5Engine, FVGDetector
 from risk_manager import RiskManager
@@ -99,7 +100,7 @@ def manage_open_trades(settings):
         entry_price = p.price_open
         sl = p.sl
 
-        # 1. Break-even logic (move SL to entry price once trade moves 1R favorable)
+        # 1. Break-even logic (move SL to entry price once trade moves in profit)
         if settings.get("breakeven_enabled"):
             buffer = 2.0 if "US100" in p.symbol else 0.5
             if p.type == mt5.POSITION_TYPE_BUY:
@@ -122,13 +123,13 @@ def manage_open_trades(settings):
                     mt5.order_send(req)
 
 def run_recent_backtest(engine, symbol, days=2):
-    """Performs historical mathematical backtest of M5 FVGs for selected lookback window."""
-    candles_per_day = 240 # ~20 active hours per day
+    """Performs statistical backtest and returns structured JSON for the Web Modal."""
+    candles_per_day = 240
     total_candles = int(days) * candles_per_day
 
     df = engine.get_candles(symbol, mt5.TIMEFRAME_M5, total_candles)
     if df is None or len(df) < 50:
-        return "Insufficient historical candles on MT5 terminal."
+        return None
 
     min_gap = 4.0 if "US100" in symbol else 0.5
     setups = 0
@@ -181,23 +182,31 @@ def run_recent_backtest(engine, symbol, days=2):
                     elif profile == 'tatico': tatico_wins += 1
                     elif profile == 'guardiao': guardiao_wins += 1
 
-    if setups == 0:
-        return f"No valid M5 FVGs formed in the last {days} day(s)."
+    s_rate = int((sniper_wins / setups) * 100) if setups > 0 else 0
+    t_rate = int((tatico_wins / setups) * 100) if setups > 0 else 0
+    g_rate = int((guardiao_wins / setups) * 100) if setups > 0 else 0
 
-    s_rate = int((sniper_wins / setups) * 100)
-    t_rate = int((tatico_wins / setups) * 100)
-    g_rate = int((guardiao_wins / setups) * 100)
+    recommended = "GUARDIAN" if g_rate >= max(s_rate, t_rate) else ("TACTICAL" if t_rate >= s_rate else "SNIPER")
 
-    best = "GUARDIAN" if g_rate >= max(s_rate, t_rate) else ("TACTICAL" if t_rate >= s_rate else "SNIPER")
-    return f"{setups} Setups found | Sniper: {s_rate}% | Tactical: {t_rate}% | Guardian: {g_rate}% -> Recommended: {best}"
+    report_payload = {
+        "symbol": symbol,
+        "days": days,
+        "setups": setups,
+        "sniper_rate": s_rate,
+        "tatico_rate": t_rate,
+        "guardiao_rate": g_rate,
+        "recommended": recommended
+    }
+    return report_payload
 
 def get_m15_trend(engine, symbol):
     df_m15 = engine.get_candles(symbol, mt5.TIMEFRAME_M15, 20)
-    if df_m15 is None: return "NEUTRAL"
+    if df_m15 is None:
+        return "NEUTRAL"
     return "UPTREND" if df_m15.iloc[-1]['close'] > df_m15.iloc[0]['close'] else "DOWNTREND"
 
 def is_fvg_close_enough(current_price, entry_price, tp_price, action, symbol):
-    """Proximity check: Avoids arming setups if price has moved too far away or already passed TP."""
+    """Proximity check: Avoids arming setups if price moved too far or already hit TP."""
     dist = abs(current_price - entry_price)
     max_dist = 25.0 if "US100" in symbol else 3.5
 
@@ -227,6 +236,7 @@ def main():
 
     processed_fvgs = []
     last_hb = 0
+    last_cmd_id = None
     current_profile = "tatico"
     active_mode = "BOTH"
     cached_settings = {}
@@ -276,22 +286,30 @@ def main():
             try:
                 latest_logs = sync.client.table("copilot_logs").select("id, message").order("created_at", {"ascending": False}).limit(1).execute()
                 if latest_logs.data:
-                    last_msg = latest_logs.data[0].get("message", "")
+                    cmd_entry = latest_logs.data[0]
+                    cmd_id = cmd_entry.get("id")
+                    last_msg = cmd_entry.get("message", "")
 
-                    # EMERGENCY STOP COMMAND
-                    if "EMERGENCY_STOP_TRIGGERED" in last_msg:
-                        cancelled = cancel_all_pending_orders()
-                        closed = close_all_open_positions()
-                        sync.add_log(None, f"EMERGENCY EXECUTED: Cancelled {cancelled} orders, closed {closed} positions", "DANGER")
+                    if cmd_id != last_cmd_id:
+                        # EMERGENCY STOP COMMAND
+                        if "EMERGENCY_STOP_TRIGGERED" in last_msg:
+                            last_cmd_id = cmd_id
+                            cancelled = cancel_all_pending_orders()
+                            closed = close_all_open_positions()
+                            sync.add_log(None, f"EMERGENCY EXECUTED: Cancelled {cancelled} orders, closed {closed} positions", "DANGER")
 
-                    # DYNAMIC BACKTEST COMMAND (Format: COMMAND: RUN_BACKTEST:SYMBOL:DAYS)
-                    elif "COMMAND: RUN_BACKTEST" in last_msg:
-                        parts = last_msg.split(":")
-                        target_sym = parts[2] if len(parts) > 2 else "US100.cash"
-                        target_days = int(parts[3]) if len(parts) > 3 else 2
-                        
-                        report = run_recent_backtest(engine, target_sym, target_days)
-                        sync.add_log(target_sym, f"BACKTEST COMPLETED ({target_days}D): {report}", "SUCCESS")
+                        # DYNAMIC BACKTEST COMMAND
+                        elif "COMMAND: RUN_BACKTEST" in last_msg:
+                            last_cmd_id = cmd_id
+                            parts = last_msg.split(":")
+                            target_sym = parts[2] if len(parts) > 2 else "US100.cash"
+                            target_days = int(parts[3]) if len(parts) > 3 else 2
+
+                            report_json = run_recent_backtest(engine, target_sym, target_days)
+                            if report_json:
+                                sync.add_log(target_sym, f"BACKTEST_RESULT:{json.dumps(report_json)}", "SUCCESS")
+                            else:
+                                sync.add_log(target_sym, "BACKTEST FAILED: Insufficient data", "DANGER")
             except Exception:
                 pass
 
