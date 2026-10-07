@@ -21,12 +21,11 @@ export default function App() {
   const [showReportModal, setShowReportModal] = useState(false);
   const [isBacktestLoading, setIsBacktestLoading] = useState(false);
 
-  // Trava para evitar que o modal reabra a cada heartbeat
+  // Trava para evitar reabertura automática
   const isAwaitingBacktestRef = useRef(false);
   const lastSeenBacktestTimestampRef = useRef(null);
 
   useEffect(() => {
-    // 1. Carrega dados iniciais
     supabase.from('copilot_status').select('*').eq('id', 1).single()
       .then(r => {
         if (r.data) {
@@ -44,14 +43,11 @@ export default function App() {
     supabase.from('copilot_logs').select('*').order('created_at', { ascending: false }).limit(40)
       .then(r => r.data && setLogs(r.data));
 
-    // 2. Realtime Listener
     const channel = supabase.channel('copilot_realtime_sync')
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'copilot_status' }, p => {
         setStatus(p.new);
         const bResult = p.new.last_backtest;
 
-        // SÓ abre o modal se o usuário estava explicitamente aguardando o resultado
-        // ou se chegou um timestamp novo diferente do anterior
         if (bResult && bResult.timestamp && bResult.timestamp !== lastSeenBacktestTimestampRef.current) {
           lastSeenBacktestTimestampRef.current = bResult.timestamp;
           setLatestBacktest(bResult);
@@ -102,7 +98,6 @@ export default function App() {
   const handleRunBacktest = async (days = 2, asset = 'US100') => {
     const symbolTarget = asset === 'US100' ? 'US100.cash' : 'XAUUSD';
 
-    // Sinaliza que o usuário está ativamente aguardando o teste
     isAwaitingBacktestRef.current = true;
     setIsBacktestLoading(true);
     setShowReportModal(true);
@@ -111,7 +106,6 @@ export default function App() {
       command: `RUN_BACKTEST:${symbolTarget}:${days}`
     }).eq('id', 1);
 
-    // Timeout de segurança (caso o MT5 não responda em 15s)
     setTimeout(() => {
       if (isAwaitingBacktestRef.current) {
         isAwaitingBacktestRef.current = false;
@@ -141,15 +135,16 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen bg-zinc-950 text-zinc-100 flex flex-col items-center p-3 sm:p-6 antialiased select-none font-sans">
-      <header className="w-full max-w-md bg-zinc-900/90 border border-zinc-800 rounded-2xl p-3.5 mb-3 flex items-center justify-between shadow-xl">
+    <div className="min-h-screen bg-zinc-950 text-zinc-100 flex flex-col items-center p-3 sm:p-5 lg:p-6 xl:p-8 antialiased select-none font-sans">
+      {/* HEADER RESPONSIVO: max-w-md no mobile, max-w-7xl no notebook */}
+      <header className="w-full max-w-md lg:max-w-6xl xl:max-w-7xl bg-zinc-900/90 border border-zinc-800 rounded-2xl p-3.5 lg:p-4 mb-3 lg:mb-4 flex items-center justify-between shadow-xl">
         <div className="flex items-center gap-2.5">
           <div className="p-2 bg-violet-500/10 border border-violet-500/20 text-violet-400 rounded-xl">
             <Zap size={18} />
           </div>
           <div>
-            <h1 className="text-sm font-bold tracking-wide">COPILOT VISUAL</h1>
-            <span className="text-[10px] text-zinc-400 font-mono">HFT FVG • Institutional</span>
+            <h1 className="text-sm lg:text-base font-bold tracking-wide">COPILOT VISUAL</h1>
+            <span className="text-[10px] text-zinc-400 font-mono">HFT FVG • Institutional Pro</span>
           </div>
         </div>
 
@@ -162,31 +157,33 @@ export default function App() {
         </button>
       </header>
 
-      <nav className="w-full max-w-md grid grid-cols-3 gap-1.5 p-1 bg-zinc-900 border border-zinc-800 rounded-xl mb-4 text-xs font-bold font-mono">
+      {/* BARRA DE NAVEGAÇÃO EXPANDIDA */}
+      <nav className="w-full max-w-md lg:max-w-6xl xl:max-w-7xl grid grid-cols-3 gap-1.5 p-1 bg-zinc-900 border border-zinc-800 rounded-xl mb-4 lg:mb-5 text-xs font-bold font-mono">
         <button
           onClick={() => setTab('dashboard')}
-          className={`py-2 rounded-lg flex items-center justify-center gap-1.5 transition-all ${
+          className={`py-2 lg:py-2.5 rounded-lg flex items-center justify-center gap-1.5 transition-all ${
             tab === 'dashboard' ? 'bg-zinc-800 text-zinc-100 shadow' : 'text-zinc-500 hover:text-zinc-300'
           }`}>
           <LayoutDashboard size={14} /> Overview
         </button>
         <button
           onClick={() => setTab('controls')}
-          className={`py-2 rounded-lg flex items-center justify-center gap-1.5 transition-all ${
+          className={`py-2 lg:py-2.5 rounded-lg flex items-center justify-center gap-1.5 transition-all ${
             tab === 'controls' ? 'bg-zinc-800 text-zinc-100 shadow' : 'text-zinc-500 hover:text-zinc-300'
           }`}>
           <Sliders size={14} /> Profiles
         </button>
         <button
           onClick={() => setTab('logs')}
-          className={`py-2 rounded-lg flex items-center justify-center gap-1.5 transition-all ${
+          className={`py-2 lg:py-2.5 rounded-lg flex items-center justify-center gap-1.5 transition-all ${
             tab === 'logs' ? 'bg-zinc-800 text-zinc-100 shadow' : 'text-zinc-500 hover:text-zinc-300'
           }`}>
           <ScrollText size={14} /> Feed
         </button>
       </nav>
 
-      <main className="w-full max-w-md flex-1">
+      {/* ÁREA PRINCIPAL EXPANSÍVEL */}
+      <main className="w-full max-w-md lg:max-w-6xl xl:max-w-7xl flex-1">
         {tab === 'dashboard' && (
           <Dashboard
             status={status}
