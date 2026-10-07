@@ -2,8 +2,14 @@
 import MetaTrader5 as mt5
 import pandas as pd
 import numpy as np
-import cv2
 from datetime import datetime
+
+# Fallback gracioso para OpenCV se não estiver instalado no sistema
+try:
+    import cv2
+    HAS_OPENCV = True
+except ImportError:
+    HAS_OPENCV = False
 
 class MT5Engine:
     def __init__(self):
@@ -93,7 +99,7 @@ class MT5Engine:
 
 
 class MarketStructureDetector:
-    """Análise Institucional de Estrutura de Mercado M15 (BOS / MSS) — Não usa média ingênua."""
+    """Análise Institucional de Estrutura de Mercado M15 (BOS / MSS)."""
     @staticmethod
     def get_m15_structure(df):
         if df is None or len(df) < 15:
@@ -103,7 +109,6 @@ class MarketStructureDetector:
         lows = df['low'].values
         closes = df['close'].values
 
-        # Identifica Swing Highs e Swing Lows locais
         swing_highs = []
         swing_lows = []
 
@@ -117,7 +122,6 @@ class MarketStructureDetector:
         last_high = swing_highs[-1] if swing_highs else highs.max()
         last_low = swing_lows[-1] if swing_lows else lows.min()
 
-        # Quebra de Estrutura (BOS / MSS)
         if last_close > last_high:
             return "BULLISH_BOS", last_high, last_low
         elif last_close < last_low:
@@ -132,55 +136,56 @@ class MarketStructureDetector:
 
 class VisionLiquidityAnalyzer:
     """
-    Módulo de Visão Computacional Gratuita usando NumPy e OpenCV.
-    Renderiza uma matriz gráfica bidimensional de preço/volume para detectar
-    piscinas de liquidez (BSL/SSL) e desequilíbrios institucionais sem custo de API.
+    Módulo de Visão Computacional Matricial usando NumPy puro (e OpenCV se disponível).
+    Renderiza um grid 2D dos preços/volumes para detectar piscinas de liquidez (BSL/SSL).
     """
     def __init__(self, resolution=(128, 128)):
         self.res = resolution
 
     def analyze_chart_matrix(self, df):
-        """
-        Gera e analisa um mapa de calor matricial dos últimos candles.
-        Retorna: score de liquidez acima e abaixo do preço atual.
-        """
         if df is None or len(df) < 20:
-            return {"clear_path": True, "bsl_score": 0, "ssl_score": 0}
+            return {"clear_path": True, "bsl_score": 0.0, "ssl_score": 0.0}
 
-        img = np.zeros(self.res, dtype=np.uint8)
-        min_p = df['low'].min()
-        max_p = df['high'].max()
+        grid = np.zeros(self.res, dtype=np.float32)
+        min_p = float(df['low'].min())
+        max_p = float(df['high'].max())
         p_range = max_p - min_p if max_p != min_p else 1.0
 
         n_bars = min(len(df), self.res[0])
         sub_df = df.iloc[-n_bars:]
 
-        # Desenha a densidade de sombras e corpos na matriz (representação gráfica)
+        # Desenha sombras e corpos na matriz de pixels
         for col_idx, (_, row) in enumerate(sub_df.iterrows()):
             y_high = int((1.0 - (row['high'] - min_p) / p_range) * (self.res[1] - 1))
             y_low = int((1.0 - (row['low'] - min_p) / p_range) * (self.res[1] - 1))
-            cv2.line(img, (col_idx, y_high), (col_idx, y_low), 120, 1)
-
             y_open = int((1.0 - (row['open'] - min_p) / p_range) * (self.res[1] - 1))
             y_close = int((1.0 - (row['close'] - min_p) / p_range) * (self.res[1] - 1))
+
+            # Sombras (linhas finas com peso 0.5)
+            y_min_w = min(y_high, y_low)
+            y_max_w = max(y_high, y_low)
+            grid[y_min_w : y_max_w + 1, col_idx] += 0.5
+
+            # Corpos (peso 1.0)
             y_top = min(y_open, y_close)
             y_bot = max(y_open, y_close)
-            cv2.line(img, (col_idx, y_top), (col_idx, y_bot), 255, 2)
+            grid[y_top : y_bot + 1, col_idx] += 1.0
 
-        # Processamento morfológico: encontra clusters de rejeição (Equal Highs / Equal Lows)
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-        dilated = cv2.dilate(img, kernel, iterations=1)
-
-        # Linha horizontal do preço atual
-        current_close = df.iloc[-1]['close']
+        current_close = float(df.iloc[-1]['close'])
         y_curr = int((1.0 - (current_close - min_p) / p_range) * (self.res[1] - 1))
+        y_curr = max(0, min(self.res[1] - 1, y_curr))
 
-        # Densidade de toques acima (Resistência/BSL) e abaixo (Suporte/SSL)
-        upper_zone = dilated[0:max(y_curr, 1), :]
-        lower_zone = dilated[min(y_curr, self.res[1]-1):, :]
+        # Se tiver OpenCV instalado, aplica filtro de dilatação morfológica
+        if HAS_OPENCV:
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+            grid = cv2.dilate(grid, kernel, iterations=1)
 
-        bsl_score = float(np.sum(upper_zone > 200))
-        ssl_score = float(np.sum(lower_zone > 200))
+        # Piscinas de Liquidez: Acima do preço (BSL) vs Abaixo do preço (SSL)
+        upper_zone = grid[0:y_curr, :]
+        lower_zone = grid[y_curr:, :]
+
+        bsl_score = float(np.sum(upper_zone >= 0.5))
+        ssl_score = float(np.sum(lower_zone >= 0.5))
 
         return {
             "clear_path": True,
@@ -214,7 +219,7 @@ class FVGDetector:
             fvg_bottom = 0.0
             gap_size = 0.0
 
-            # Bullish FVG (Mínima do candle 3 > Máxima do candle 1)
+            # Bullish FVG
             if candle3['low'] > candle1['high']:
                 gap_size = candle3['low'] - candle1['high']
                 if gap_size >= min_gap:
@@ -222,7 +227,7 @@ class FVGDetector:
                     fvg_top = candle3['low']
                     fvg_bottom = candle1['high']
 
-            # Bearish FVG (Máxima do candle 3 < Mínima do candle 1)
+            # Bearish FVG
             elif candle3['high'] < candle1['low']:
                 gap_size = candle1['low'] - candle3['high']
                 if gap_size >= min_gap:
