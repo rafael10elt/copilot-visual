@@ -1,5 +1,7 @@
+# ai_groq.py — Agente de Inteligência de Regime Macro (Assíncrono e Desacoplado da Execução)
 import os
 import json
+import time
 from groq import Groq
 from dotenv import load_dotenv
 
@@ -8,93 +10,77 @@ load_dotenv()
 class LumiGroqAgent:
     def __init__(self):
         api_key = os.getenv("GROQ_API_KEY")
-        if not api_key:
-            raise ValueError("⚠️ GROQ_API_KEY não encontrada no arquivo .env!")
+        self.enabled = bool(api_key)
+        self.client = Groq(api_key=api_key) if self.enabled else None
+        self.model = "llama-3.3-70b-versatile"
         
-        self.client = Groq(api_key=api_key)
-        self.model = self.discover_best_model()
+        # Cache de Viés Macro (Atualizado em background a cada 15 min para NÃO travar scalping)
+        self.macro_cache = {
+            "NASDAQ": {"bias": "NEUTRAL", "allowed_profiles": ["tatico", "guardiao"], "updated_at": 0},
+            "GOLD": {"bias": "NEUTRAL", "allowed_profiles": ["tatico", "guardiao"], "updated_at": 0}
+        }
 
-    def discover_best_model(self):
-        """Descobre dinamicamente os modelos ativos na sua conta do Groq."""
-        # Lista dos melhores modelos em ordem de prioridade
-        preferidos = [
-            "llama-3.3-70b-versatile",
-            "llama-3.1-8b-instant",
-            "llama-3.1-70b-versatile",
-            "mixtral-8x7b-32768",
-            "gemma2-9b-it",
-            "openai/gpt-oss-20b"
-        ]
+    def update_macro_regime_async(self, symbol_key, m15_structure, atr, spreads):
+        """
+        Atualiza o viés macroeconômico em segundo plano.
+        Essa chamada NÃO bloqueia o envio de ordens.
+        """
+        if not self.enabled:
+            return
 
-        try:
-            # Pede para a API do Groq a lista real do que está liberado para você
-            lista = self.client.models.list()
-            ativos = [m.id for m in lista.data]
-            print(f"[IA] Modelos encontrados na sua conta: {ativos[:4]}...")
+        now = time.time()
+        if now - self.macro_cache.get(symbol_key, {}).get("updated_at", 0) < 900: # 15 minutos de cache
+            return
 
-            for cand in preferidos:
-                if cand in ativos:
-                    print(f"✅ [IA] Modelo autoselecionado com sucesso: {cand}")
-                    return cand
-
-            # Se nenhum dos preferidos estiver, pega o primeiro modelo de chat ativo
-            escolhido = ativos[0]
-            print(f"ℹ️ [IA] Usando modelo padrão ativo da conta: {escolhido}")
-            return escolhido
-
-        except Exception as e:
-            print(f"⚠️ [IA] Erro ao listar modelos ({e}). Usando fallback padrão.")
-            return "llama-3.3-70b-versatile"
-
-    def validate_fvg_trade(self, symbol, fvg_type, fvg_price, m15_trend, atr, current_profile):
-        """Envia o contexto matemático para validação."""
         prompt = f"""
-        Você é um algoritmo institucional de trading. Responda APENAS em JSON no seguinte formato:
-        {{"autorizado": true, "motivo": "resumo curto", "acao": "BUY_LIMIT"}} ou {{"autorizado": false, "motivo": "motivo", "acao": "NONE"}}
+        Você é o Chief Risk Officer de uma mesa proprietária institucional.
+        Analise o regime para o ativo {symbol_key}:
+        - Estrutura M15: {m15_structure}
+        - ATR Atual: {atr}
+        - Spread Atual: {spreads}
 
-        CENÁRIO:
-        - Ativo: {symbol}
-        - Tendência M15: {m15_trend}
-        - FVG M5: {fvg_type} em {fvg_price}
-        - Volatilidade ATR M1: {atr}
-        - Perfil: {current_profile}
-
-        REGRA:
-        1. BULLISH FVG só é autorizado se M15 for de Alta (UPTREND). Ação: BUY_LIMIT.
-        2. BEARISH FVG só é autorizado se M15 for de Baixa (DOWNTREND). Ação: SELL_LIMIT.
-        3. Caso contrário, autorizado: false e acao: NONE.
+        Responda APENAS em JSON no formato:
+        {{
+            "bias": "BULLISH" ou "BEARISH" ou "NEUTRAL",
+            "allowed_profiles": ["sniper", "tatico"] ou ["guardiao"],
+            "justificativa": "resumo de 1 frase"
+        }}
         """
 
-        # Tenta com o modelo principal, se falhar tenta alternativas
-        modelos_tentativa = [self.model, "llama-3.3-70b-versatile", "gemma2-9b-it"]
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": "Responda estritamente em JSON puro sem markdown."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.2,
+                response_format={"type": "json_object"}
+            )
+            data = json.loads(response.choices[0].message.content)
+            self.macro_cache[symbol_key] = {
+                "bias": data.get("bias", "NEUTRAL"),
+                "allowed_profiles": data.get("allowed_profiles", ["tatico"]),
+                "updated_at": now
+            }
+            print(f"🧠 [IA GROQ MACRO] {symbol_key} atualizado: Viés {data.get('bias')} | Perfis: {data.get('allowed_profiles')}")
+        except Exception as e:
+            print(f"⚠️ [IA GROQ] Falha na atualização macro ({e}). Mantendo heurística local.")
 
-        for mod in modelos_tentativa:
-            try:
-                response = self.client.chat.completions.create(
-                    model=mod,
-                    messages=[
-                        {"role": "system", "content": "Você é uma IA de trading que só responde em JSON estrito."},
-                        {"role": "user", "content": prompt}
-                    ],
-                    temperature=0.1,
-                    response_format={"type": "json_object"}
-                )
-                resposta_texto = response.choices[0].message.content
-                decisao = json.loads(resposta_texto)
-                return decisao
+    def quick_validate_trade(self, symbol_key, direction, current_profile):
+        """
+        Validação instantânea em memória (< 1 milissegundo).
+        Verifica o viés macro em cache sem fazer requisição de rede.
+        """
+        cached = self.macro_cache.get(symbol_key)
+        if not cached or cached["bias"] == "NEUTRAL":
+            return True, "Neutro / Liberado por Heurística Local"
 
-            except Exception as e:
-                print(f"⚠️ Tentativa com {mod} falhou: {e}. Tentando alternativa...")
-                continue
+        # Se a IA identificou regime estritamente baixista, não permite compras no topo
+        if cached["bias"] == "BEARISH" and direction == "BUY":
+            return False, f"IA Macro definiu viés BEARISH para {symbol_key}"
 
-        # Fallback Heurístico Institucional (Garante que você não perde o trade se a API oscilar)
-        print("⚡ [IA FALLBACK] Validando matematicamente pelo algoritmo interno...")
-        if fvg_type == "BULLISH" and "UPTREND" in m15_trend:
-            return {"autorizado": True, "motivo": "Heurística: Alinhamento M15 Alta com FVG Compra", "acao": "BUY_LIMIT"}
-        elif fvg_type == "BEARISH" and "DOWNTREND" in m15_trend:
-            return {"autorizado": True, "motivo": "Heurística: Alinhamento M15 Baixa com FVG Venda", "acao": "SELL_LIMIT"}
-        
-        return {"autorizado": False, "motivo": "FVG contra a tendência maior do M15", "acao": "NONE"}
+        if cached["bias"] == "BULLISH" and direction == "SELL":
+            return False, f"IA Macro definiu viés BULLISH para {symbol_key}"
 
-    def analyze_daily_regime(self, market_summary_json):
-        return {"perfil_recomendado": "tatico", "justificativa": "Modo automático calibrado."}
+        return True, "Alinhado com Viés Institucional da IA"

@@ -2,4 +2,6 @@ MetaTrader5
 supabase
 groq
 pandas
+numpy
+opencv-python-headless
 python-dotenv
