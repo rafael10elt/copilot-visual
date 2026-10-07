@@ -1,8 +1,8 @@
-# mt5_core.py — Motor de Conexão, Sessões, Sweeps e Scanner de Histórico Completo
+# mt5_core.py — Conexão, Killzones Alinhadas a UTC, Filtro de Spread e Visão Computacional
 import MetaTrader5 as mt5
 import pandas as pd
 import numpy as np
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 
 try:
     import cv2
@@ -10,10 +10,12 @@ try:
 except ImportError:
     HAS_OPENCV = False
 
+
 class MT5Engine:
     def __init__(self):
         self.connected = False
         self.symbol_cache = {}
+        self.broker_utc_offset_hours = 2  # Padrão EET (GMT+2 / GMT+3)
 
     def start(self):
         print("[MT5] Conectando ao terminal MetaTrader 5...")
@@ -26,6 +28,8 @@ class MT5Engine:
         acc_id = account.login if account else "Desconhecido"
         server = account.server if account else "Desconhecido"
         print(f"✅ [MT5] Conectado! Conta: {acc_id} | Servidor: {server} | Build: {mt5.version()[0]}")
+        
+        self._calibrate_broker_utc_offset()
         return True
 
     def stop(self):
@@ -33,6 +37,17 @@ class MT5Engine:
             mt5.shutdown()
             self.connected = False
             print("[MT5] Conexão encerrada.")
+
+    def _calibrate_broker_utc_offset(self):
+        """Calcula a diferença entre o relógio da corretora e o UTC real."""
+        tick = mt5.symbol_info_tick("EURUSD") or mt5.symbol_info_tick("XAUUSD")
+        if tick and tick.time > 0:
+            now_utc = datetime.now(timezone.utc).timestamp()
+            diff_hours = round((tick.time - now_utc) / 3600.0)
+            self.broker_utc_offset_hours = diff_hours
+            print(f"🌐 [TIME SYNC] Offset do servidor da corretora detectado: UTC{'+' if diff_hours >= 0 else ''}{diff_hours}")
+        else:
+            print(f"⚠️ [TIME SYNC] Usando offset padrão da corretora: UTC+{self.broker_utc_offset_hours}")
 
     def resolve_symbol(self, category):
         if category in self.symbol_cache:
@@ -84,17 +99,59 @@ class MT5Engine:
         df['time'] = pd.to_datetime(df['time'], unit='s')
         return df
 
+    def get_broker_current_time(self, symbol="XAUUSD"):
+        tick = mt5.symbol_info_tick(symbol)
+        if tick and tick.time > 0:
+            return datetime.fromtimestamp(tick.time)
+        # Fallback usando o offset calibrado
+        return datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=self.broker_utc_offset_hours)
+
+    def is_spread_acceptable(self, symbol):
+        """Evita entradas quando o spread dilata por baixa liquidez ou notícias."""
+        info = mt5.symbol_info(symbol)
+        if not info:
+            return False, "Símbolo inacessível"
+
+        point = info.point
+        spread_pts = info.spread * point
+        is_nasdaq = any(x in symbol.upper() for x in ["US100", "NAS", "USTEC", "NQ"])
+
+        # Teto tolerado de spread (pontos de cotação)
+        max_allowed = 3.5 if is_nasdaq else 0.45
+        if spread_pts > max_allowed:
+            return False, f"Spread excessivo ({spread_pts:.2f} pts > teto de {max_allowed} pts)"
+
+        return True, "Spread OK"
+
 
 class InstitutionalSessionFilter:
     @staticmethod
-    def is_session_active(symbol, candle_time):
-        hour = candle_time.hour
-        is_nasdaq = "US100" in symbol.upper() or "NAS" in symbol.upper() or "USTEC" in symbol.upper()
+    def is_session_active(symbol, broker_candle_time, broker_utc_offset=2):
+        """
+        Converte o horário do candle do servidor para UTC real e valida
+        as Killzones oficiais de Londres e Nova York.
+        """
+        # Converter server time para UTC real
+        candle_utc = broker_candle_time - timedelta(hours=broker_utc_offset)
+        utc_hour = candle_utc.hour
+        utc_minute = candle_utc.minute
+
+        # Bloqueio estrito da virada/rollover (spreads extremos entre 21h e 23h UTC)
+        if utc_hour >= 21 or utc_hour < 2:
+            return False
+
+        is_nasdaq = any(x in symbol.upper() for x in ["US100", "NAS", "USTEC", "NQ"])
 
         if is_nasdaq:
-            return 14 <= hour <= 22  # Janela de NY ampliada
+            # NY Cash Open: 13:30 às 17:00 UTC (maior respeito aos FVGs do índice)
+            if (utc_hour == 13 and utc_minute >= 30) or (14 <= utc_hour < 17):
+                return True
+            return False
         else:
-            return 8 <= hour <= 22   # Londres e NY ampliadas
+            # XAUUSD: Londres (07:00 às 10:30 UTC) e Nova York (12:30 às 16:30 UTC)
+            london = (7 <= utc_hour < 10) or (utc_hour == 10 and utc_minute <= 30)
+            ny = (12 <= utc_hour < 16) or (utc_hour == 16 and utc_minute <= 30)
+            return london or ny
 
 
 class LiquiditySweepDetector:
@@ -121,6 +178,11 @@ class VisionLiquidityAnalyzer:
         self.res = resolution
 
     def validate_liquidity_path(self, df, direction, entry_price, tp_price):
+        """
+        Analisa a rota do preço até o Take Profit.
+        Se a região entre a entrada e o TP já foi amplamente congestionada,
+        a ordem é rejeitada para evitar reversões em falso breakout.
+        """
         if df is None or len(df) < 20:
             return True, "Candles insuficientes"
 
@@ -157,7 +219,6 @@ class VisionLiquidityAnalyzer:
         path_zone = grid[y_start:y_end, :]
         density = np.sum(path_zone >= 1.0) / (path_zone.size + 1e-5)
 
-        # Tolerância ajustada para 55% para não estrangular setups válidos
         if density > 0.55:
             return False, f"Absorção densa ({density:.1%})"
 
@@ -205,15 +266,11 @@ class FVGDetector:
         self.min_gap_xau = min_gap_xau
 
     def find_all_historical_fvgs(self, df, symbol):
-        """
-        Coleta TODOS os FVGs formados cronologicamente para BACKTEST.
-        Não descarta os que foram tocados depois, permitindo simulação 100% fiel.
-        """
         if df is None or len(df) < 5:
             return []
 
         fvgs = []
-        is_nasdaq = "US100" in symbol.upper() or "NAS" in symbol.upper() or "USTEC" in symbol.upper()
+        is_nasdaq = any(x in symbol.upper() for x in ["US100", "NAS", "USTEC", "NQ"])
         min_gap = self.min_gap_nasdaq if is_nasdaq else self.min_gap_xau
 
         for i in range(len(df) - 3):
@@ -247,7 +304,7 @@ class FVGDetector:
                 )
 
                 fvgs.append({
-                    'index': i + 2, # Confirmado no fechamento de c3
+                    'index': i + 2,
                     'type': fvg_type,
                     'top': round(float(fvg_top), 2),
                     'bottom': round(float(fvg_bottom), 2),
@@ -262,7 +319,6 @@ class FVGDetector:
         return fvgs
 
     def find_unmitigated_fvgs(self, df, symbol):
-        """Coleta apenas os FVGs vivos em aberto para o Live Trading."""
         all_fvgs = self.find_all_historical_fvgs(df, symbol)
         unmitigated = []
 

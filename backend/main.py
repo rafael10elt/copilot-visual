@@ -1,7 +1,8 @@
-# main.py — Orquestrador HFT com Expectativa Realista Rígida de Mesa Proprietária
+# main.py — Orquestrador HFT Completo (Live Trading + Sandbox Backtest + Escudos de Mesa)
 import time
 import json
-from datetime import datetime, timedelta
+import requests
+from datetime import datetime, timezone, timedelta
 import MetaTrader5 as mt5
 
 from mt5_core import (
@@ -17,6 +18,49 @@ from supabase_client import SupabaseSync
 from strategy_scout import StrategyScout
 
 ROBOT_MAGIC = 777999
+
+
+class EconomicNewsFilter:
+    """Consome o calendário ForexFactory e bloqueia operações em horários de alto impacto."""
+    def __init__(self, cache_ttl_seconds=900):
+        self.cache_ttl = cache_ttl_seconds
+        self.last_fetch = 0
+        self.cached_events = []
+
+    def refresh_events(self):
+        now = time.time()
+        if now - self.last_fetch < self.cache_ttl:
+            return
+
+        try:
+            url = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+            res = requests.get(url, timeout=4)
+            if res.status_code == 200:
+                self.cached_events = res.json()
+                self.last_fetch = now
+                print("📰 [NEWS FILTER] Calendário econômico atualizado com sucesso.")
+        except Exception as e:
+            print(f"⚠️ [NEWS FILTER] Falha ao consultar notícias: {e}")
+
+    def is_news_window_active(self, window_minutes=15):
+        self.refresh_events()
+        now_utc = datetime.now(timezone.utc)
+
+        for ev in self.cached_events:
+            if ev.get("impact") == "High" and ev.get("country") in ["USD"]:
+                try:
+                    ev_time_str = ev["date"].replace("Z", "+00:00")
+                    ev_time = datetime.fromisoformat(ev_time_str)
+                    diff_minutes = (ev_time - now_utc).total_seconds() / 60.0
+
+                    # Janela de proteção: 15 minutos antes até 10 minutos após o anúncio
+                    if -10 <= diff_minutes <= window_minutes:
+                        return True, ev.get("title", "Notícia de Alto Impacto USD")
+                except Exception:
+                    continue
+
+        return False, None
+
 
 def get_best_filling_mode(symbol):
     info = mt5.symbol_info(symbol)
@@ -77,7 +121,7 @@ def send_limit_order(symbol, action, entry_price, sl, tp, lot_size):
 
     return True, "Ordem armada com sucesso"
 
-def purge_stale_pending_orders(max_age_minutes=15):
+def purge_stale_pending_orders(max_age_minutes=8):
     orders = mt5.orders_get()
     if not orders: return 0
 
@@ -92,7 +136,7 @@ def purge_stale_pending_orders(max_age_minutes=15):
                 res = mt5.order_send(req)
                 if res.retcode == mt5.TRADE_RETCODE_DONE:
                     cancelled += 1
-                    print(f"🧹 [PURGE] Ordem #{o.ticket} cancelada ({int(age_sec/60)}m).")
+                    print(f"🧹 [PURGE] Ordem expirada #{o.ticket} cancelada ({int(age_sec/60)}m).")
     return cancelled
 
 def cancel_all_pending_orders():
@@ -131,7 +175,7 @@ def close_all_open_positions():
     return closed
 
 def manage_open_trades(risk_manager, settings):
-    if not settings.get("breakeven_enabled", True): return
+    if not settings.get("breakeven_enabled", False): return
     positions = mt5.positions_get()
     if not positions: return
 
@@ -226,19 +270,18 @@ def get_today_performance(risk_base=50.0):
             "realized_pnl": 0.0, "net_r": 0.0, "open_count": 0, "open_positions": [], "closed_trades": []
         }
 
+
 def run_recent_backtest(engine, symbol, days=0, risk_per_trade=50.0):
     """
-    BACKTEST DE EXPECTATIVA REALISTA RIGOROSA:
-    1. Execução Sequencial Estrita (Zero sobreposição).
-    2. Teto Operacional: Máximo 4 a 5 trades por sessão/dia.
-    3. Trava de Meta Diária (+3.0R) e Trava de Perda Diária (-2.0R).
-    4. Penetração Estrita de Spread para preenchimento.
-    5. Pessimismo Intrabar em caso de conflito no mesmo candle.
+    MOTOR DO SANDBOX BACKTEST REALISTA COM MATRIZ RAIO-X
+    1. Execução Sequencial Estrita (Zero sobreposição irreal).
+    2. Respeita Killzones com relógio UTC sincronizado.
+    3. Fricções de Mesa: Spread, Slippage, Comissões e Trava de Meta/Perda Diária.
+    4. Pessimismo Intrabar em caso de conflito simultâneo.
     """
     if not symbol: return None
 
-    tick_ref = mt5.symbol_info_tick(symbol)
-    broker_now = datetime.fromtimestamp(tick_ref.time) if tick_ref else datetime.now()
+    broker_now = engine.get_broker_current_time(symbol)
 
     if days == 0:
         start_of_day = datetime(broker_now.year, broker_now.month, broker_now.day, 0, 0, 0)
@@ -255,7 +298,7 @@ def run_recent_backtest(engine, symbol, days=0, risk_per_trade=50.0):
 
     if df_m5 is None or df_m1 is None: return None
 
-    is_nasdaq = "US100" in symbol or "NAS" in symbol or "USTEC" in symbol
+    is_nasdaq = any(x in symbol.upper() for x in ["US100", "NAS", "USTEC", "NQ"])
     min_stop_points = 5.0 if is_nasdaq else 1.2
     max_risk = 30.0 if is_nasdaq else 4.5
 
@@ -307,8 +350,14 @@ def run_recent_backtest(engine, symbol, days=0, risk_per_trade=50.0):
                             daily_net_r = 0.0
                             day_locked = False
 
-                        # TRAVA INSTITUCIONAL DE MESA: Se atingiu meta diária (+3.5R) ou limite (-2R), descansa o restante do dia
+                        # Trava de Mesa: Meta (+3.5R) ou Stop Diário (-2.0R) atingidos
                         if day_locked or daily_trade_count >= 5:
+                            continue
+
+                        # Validação de Horário Alinhada a UTC
+                        if not InstitutionalSessionFilter.is_session_active(
+                            symbol, f['raw_time'], engine.broker_utc_offset_hours
+                        ):
                             continue
 
                         if req_sweep and not f['has_sweep']:
@@ -340,7 +389,7 @@ def run_recent_backtest(engine, symbol, days=0, risk_per_trade=50.0):
                         if start_idx == 0 or start_idx >= len(m1_times): 
                             continue
 
-                        # Trava Sequencial
+                        # Trava Sequencial (1 trade ativo por vez)
                         if start_idx <= bot_busy_until_m1_idx:
                             continue
 
@@ -352,8 +401,6 @@ def run_recent_backtest(engine, symbol, days=0, risk_per_trade=50.0):
                         win, loss, hit_be = False, False, False
                         trade_resolved_idx = start_idx
 
-                        # PREENCHIMENTO ESTRITO COM FRICÇÃO REAL
-                        # Para entrar numa compra Limit, o preço precisa ter caído abaixo do spread
                         strict_fill_penetration = spread_pts * 0.4
                         if direction == "BUY":
                             effective_entry = raw_entry + spread_pts + slippage_pts
@@ -380,7 +427,7 @@ def run_recent_backtest(engine, symbol, days=0, risk_per_trade=50.0):
                                 if direction == "BUY" and h >= (effective_entry + risk * 1.2): hit_be = True
                                 elif direction == "SELL" and l <= (effective_entry - risk * 1.2): hit_be = True
 
-                            # PESSIMISMO INTRABAR: Se tocou ambos no mesmo candle, assume STOP
+                            # Pessimismo Intrabar
                             if direction == "BUY":
                                 hit_tp = (h >= effective_tp)
                                 hit_sl = (l <= effective_sl) if not hit_be else (l <= effective_entry)
@@ -417,7 +464,6 @@ def run_recent_backtest(engine, symbol, days=0, risk_per_trade=50.0):
                         if triggered:
                             trades_executed += 1
                             daily_trade_count += 1
-                            # Cooldown institucional de 10 minutos após o encerramento do trade
                             bot_busy_until_m1_idx = trade_resolved_idx + 10
 
                             if win:
@@ -429,7 +475,6 @@ def run_recent_backtest(engine, symbol, days=0, risk_per_trade=50.0):
                             elif hit_be and not win:
                                 be_count += 1
 
-                            # Trava de Meta / Limite do Dia
                             if daily_net_r >= 3.5 or daily_net_r <= -2.0:
                                 day_locked = True
 
@@ -491,12 +536,13 @@ def run_recent_backtest(engine, symbol, days=0, risk_per_trade=50.0):
         "sniper": get_subset(use_ce=True, be=True)["sniper"],
         "tatico": get_subset(use_ce=True, be=True)["tatico"],
         "guardiao": get_subset(use_ce=True, be=True)["guardiao"],
-        "recommended": f"{best['profile']} ({best['entry']} | {best['sweep']} | {best['be_label']})" if best else "TACTICAL (50% CE)"
+        "recommended": f"{best['profile']} ({best['entry']} | {best['sweep']} | {best['be_label']})" if best else "GUARDIAN (50% CE)"
     }
+
 
 def main():
     print("==================================================")
-    print("🚀 LUMI COPILOT HFT - PRO (INSTITUTIONAL SMC / SCOUT)")
+    print("🚀 LUMI COPILOT HFT - PRO (INSTITUTIONAL SMC / PROP SHIELD)")
     print("==================================================")
 
     engine = MT5Engine()
@@ -507,6 +553,7 @@ def main():
     ia_agent = LumiGroqAgent()
     sync = SupabaseSync()
     vision = VisionLiquidityAnalyzer()
+    news_filter = EconomicNewsFilter()
 
     scout = StrategyScout(engine, sync, eval_interval_seconds=3600)
     scout.start()
@@ -517,14 +564,13 @@ def main():
     active_mode = "BOTH"
     cached_settings = {}
 
-    sync.add_log(None, "Motor conectado com Expectativa Realista Rígida.", "INFO")
+    sync.add_log(None, "Motor conectado com Escudo de Notícias e Horário UTC Calibrado.", "INFO")
 
     try:
         while True:
-            tick_ref = mt5.symbol_info_tick("XAUUSD") or mt5.symbol_info_tick("US100.cash")
-            broker_time = datetime.fromtimestamp(tick_ref.time) if tick_ref else datetime.now()
+            broker_time = engine.get_broker_current_time("XAUUSD")
 
-            # 1. Telemetria e Escudo de Mesa
+            # 1. Escudo de Mesa (Trava no Benchmark da Meia-Noite da Corretora)
             acc = mt5.account_info()
             if acc:
                 balance, equity = acc.balance, acc.equity
@@ -533,19 +579,25 @@ def main():
                 
                 breached, msg = risk_manager.update_account_state(balance, equity, broker_time)
                 if breached:
-                    sync.add_log(None, f"⛔ [PROP SHIELD] {msg} — Travando operações!", "DANGER")
+                    sync.add_log(None, f"⛔ [PROP SHIELD] {msg} — Travando novas operações!", "DANGER")
                     cancel_all_pending_orders()
-                    close_all_open_positions()
                     time.sleep(10)
                     continue
             else:
                 balance, equity, pnl_today, login, server = 0, 0, 0, "--", "--"
 
-            # 2. Sincronização a cada 2s
+            # 2. Escudo de Notícias Econômicas
+            is_news, news_title = news_filter.is_news_window_active(window_minutes=15)
+            if is_news:
+                purged = cancel_all_pending_orders()
+                if purged > 0:
+                    sync.add_log(None, f"📰 [NEWS SHIELD] {purged} ordens pendentes canceladas por anúncio: {news_title}", "WARN")
+
+            # 3. Sincronização Periódica a cada 2s + Execução de Comandos Remotos
             agora = time.time()
             if agora - last_hb >= 2.0:
                 last_hb = agora
-                purge_stale_pending_orders(max_age_minutes=15)
+                purge_stale_pending_orders(max_age_minutes=8)
 
                 remote = sync.check_remote_settings()
                 if remote:
@@ -560,6 +612,7 @@ def main():
                         try: sync.client.table("copilot_settings").update({"command": None}).eq("id", 1).execute()
                         except: pass
 
+                        # GATILHO DO SANDBOX BACKTEST VICIADO PELO DASHBOARD
                         if "RUN_BACKTEST" in cmd:
                             parts = cmd.split(":")
                             cat = "NASDAQ" if "US100" in parts[1] else "GOLD"
@@ -582,16 +635,21 @@ def main():
                 today_stats["is_auto_ai"] = bool(cached_settings.get("auto_profile_ia", False))
                 today_stats["active_strategy"] = {
                     "entry_type": "50% Consequent Encroachment (CE)" if cached_settings.get("use_ce_50", True) else "Borda do FVG",
-                    "breakeven": "ATIVO (1.2R)" if cached_settings.get("breakeven_enabled", True) else "DESLIGADO",
+                    "breakeven": "ATIVO (1.2R)" if cached_settings.get("breakeven_enabled", False) else "DESLIGADO",
                     "trailing": "ATIVO" if cached_settings.get("trailing_enabled", False) else "DESLIGADO"
                 }
 
                 sync.send_heartbeat(current_profile, pnl_today, login, balance, equity, server, today_stats)
 
-            # 3. Gestão de Posições Abertas
+            # 4. Gestão de Ordens Abertas
             manage_open_trades(risk_manager, cached_settings)
 
-            # 4. Ativos Alvos
+            # Se estiver na janela de notícias, não busca novas entradas
+            if is_news:
+                time.sleep(1)
+                continue
+
+            # 5. Seleção de Ativos Alvo
             targets = []
             if active_mode in ["BOTH", "US100"]:
                 sym_nasdaq = engine.resolve_symbol("NASDAQ")
@@ -601,13 +659,19 @@ def main():
                 sym_gold = engine.resolve_symbol("GOLD")
                 if sym_gold: targets.append(("GOLD", sym_gold))
 
-            # 5. Varredura Operacional Institucional
+            # 6. Varredura Operacional Institucional
             for category, symbol in targets:
                 if has_active_order_or_position(symbol):
                     continue
 
+                spread_ok, spread_msg = engine.is_spread_acceptable(symbol)
+                if not spread_ok:
+                    continue
+
                 use_sess = cached_settings.get("use_session_filter", True)
-                if use_sess and not InstitutionalSessionFilter.is_session_active(symbol, broker_time):
+                if use_sess and not InstitutionalSessionFilter.is_session_active(
+                    symbol, broker_time, engine.broker_utc_offset_hours
+                ):
                     continue
 
                 is_auto = cached_settings.get("auto_profile_ia", False)
@@ -653,7 +717,7 @@ def main():
                     direction = "BUY" if fvg['type'] == 'BULLISH' else "SELL"
                     entry_candidate = fvg['ce_50'] if use_ce_50 else (fvg['top'] if direction == "BUY" else fvg['bottom'])
 
-                    max_dist = 22.0 if "US100" in symbol or "NAS" in symbol else 3.5
+                    max_dist = 22.0 if any(x in symbol.upper() for x in ["US100", "NAS", "USTEC", "NQ"]) else 3.5
                     dist = abs(current_price - entry_candidate)
                     if dist > max_dist:
                         processed_fvgs.add(fvg_id)

@@ -1,4 +1,4 @@
-# strategy_scout.py — Agente de Inteligência Walk-Forward com Regras Rígidas de Mesa
+# strategy_scout.py — Calibrador Walk-Forward com Janela Significativa e Simulação Integral de BE
 import time
 import threading
 import MetaTrader5 as mt5
@@ -15,7 +15,7 @@ class StrategyScout:
         self.thread = None
         
         self.active_directives = {
-            "NASDAQ": {"use_ce_50": True, "require_sweep": False, "recommended_profile": "tatico", "prop_score": 0.0, "should_trade": True},
+            "NASDAQ": {"use_ce_50": True, "require_sweep": False, "recommended_profile": "guardiao", "prop_score": 0.0, "should_trade": True},
             "GOLD": {"use_ce_50": True, "require_sweep": False, "recommended_profile": "tatico", "prop_score": 0.0, "should_trade": True}
         }
 
@@ -30,13 +30,14 @@ class StrategyScout:
         time.sleep(5)
         while self.is_running:
             try:
-                self.run_full_evaluation()
+                # Janela expandida para 10 dias para evitar sobreajuste em amostras insignificantes
+                self.run_full_evaluation(days=10)
             except Exception as e:
                 print(f"⚠️ [STRATEGY SCOUT] Falha na calibração: {e}")
 
             time.sleep(self.interval)
 
-    def run_full_evaluation(self, days=2, base_risk=50.0):
+    def run_full_evaluation(self, days=10, base_risk=50.0):
         for category in ["NASDAQ", "GOLD"]:
             symbol = self.engine.resolve_symbol(category)
             if not symbol:
@@ -49,7 +50,7 @@ class StrategyScout:
                 msg = (
                     f"DIRETRIZ {category}: {best_directive['recommended_profile'].upper()} [{status_trade}] | "
                     f"50%_CE={best_directive['use_ce_50']} | Sweep={best_directive['require_sweep']} | "
-                    f"Score={best_directive['prop_score']:.1f} (WinRate: {best_directive['win_rate']}%)"
+                    f"Score={best_directive['prop_score']:.1f} (WinRate: {best_directive['win_rate']}%, Trades: {best_directive['trades']})"
                 )
                 print(f"🎯 [SCOUT RECOMMENDATION] {msg}")
                 self.sync.add_log(symbol, msg, "SUCCESS" if best_directive["should_trade"] else "WARN")
@@ -64,9 +65,14 @@ class StrategyScout:
         if df_m5 is None or df_m1 is None:
             return None
 
-        is_nasdaq = "US100" in symbol or "NAS" in symbol or "USTEC" in symbol
+        is_nasdaq = any(x in symbol.upper() for x in ["US100", "NAS", "USTEC", "NQ"])
         min_stop_points = 5.0 if is_nasdaq else 1.2
         max_risk = 30.0 if is_nasdaq else 4.5
+
+        info = mt5.symbol_info(symbol)
+        point = info.point if info else 0.01
+        spread_pts = (info.spread * point) if (info and info.spread > 0) else (1.5 if is_nasdaq else 0.25)
+        slippage_pts = 0.8 if is_nasdaq else 0.15
 
         detector = FVGDetector()
         vision = VisionLiquidityAnalyzer()
@@ -113,7 +119,8 @@ class StrategyScout:
                     if day_locked or daily_trades >= 5:
                         continue
 
-                    if not InstitutionalSessionFilter.is_session_active(symbol, f['raw_time']):
+                    # Respeita o offset UTC calibrado
+                    if not InstitutionalSessionFilter.is_session_active(symbol, f['raw_time'], self.engine.broker_utc_offset_hours):
                         continue
 
                     if comb["require_sweep"] and not f.get("has_sweep", False):
@@ -150,13 +157,17 @@ class StrategyScout:
                     win, loss, hit_be = False, False, False
                     trade_res_idx = start_idx
 
+                    # Aplica fricção realista para preenchimento de ordem limite
+                    strict_fill_penetration = spread_pts * 0.4
+
                     for step, (h, l) in enumerate(zip(sim_h, sim_l)):
                         cur_idx = start_idx + step
                         if not triggered:
-                            if direction == "BUY" and l <= entry: triggered = True
-                            elif direction == "SELL" and h >= entry: triggered = True
+                            if direction == "BUY" and l <= (entry - strict_fill_penetration): triggered = True
+                            elif direction == "SELL" and h >= (entry + strict_fill_penetration): triggered = True
                             if not triggered: continue
 
+                        # Rastreamento completo de acionamento do Break-Even
                         if not hit_be:
                             if direction == "BUY" and h >= (entry + risk * 1.2): hit_be = True
                             elif direction == "SELL" and l <= (entry - risk * 1.2): hit_be = True
@@ -189,7 +200,9 @@ class StrategyScout:
                             day_locked = True
 
                 total_resolved = wins + losses
-                if total_resolved < 2:
+                
+                # Exigência de amostragem mínima de operações resolvidas
+                if total_resolved < 8:
                     continue
 
                 win_rate = (wins / total_resolved) * 100.0 if total_resolved > 0 else 0.0
@@ -216,5 +229,5 @@ class StrategyScout:
 
     def get_directive(self, category):
         return self.active_directives.get(category, {
-            "use_ce_50": True, "require_sweep": False, "recommended_profile": "tatico", "should_trade": True
+            "use_ce_50": True, "require_sweep": False, "recommended_profile": "guardiao", "should_trade": True
         })
