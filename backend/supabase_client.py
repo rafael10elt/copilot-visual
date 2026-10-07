@@ -39,7 +39,7 @@ class SupabaseSync:
             self.client.table("copilot_status").update(payload).eq("id", 1).execute()
         except Exception as e:
             print(f"Erro heartbeat: {e}")
-            
+                  
     def add_log(self, symbol, message, level="INFO"):
         print(f"[{level}] {symbol or 'SISTEMA'}: {message}")
         if not self.enabled: return

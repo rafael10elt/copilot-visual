@@ -103,71 +103,89 @@ def manage_open_trades(settings):
                     req = {"action": mt5.TRADE_ACTION_SLTP, "position": p.ticket, "sl": float(entry_price - 0.1), "tp": p.tp}
                     mt5.order_send(req)
 
+from datetime import datetime, timedelta
+
 def get_today_performance():
-    """Extrai os contadores reais de trades de hoje do MT5 (Posições Abertas + Fechadas)."""
-    now = datetime.now()
-    start_of_day = datetime(now.year, now.month, now.day, 0, 0, 0)
+    """Extrai os contadores reais de trades de hoje do MT5 sincronizado com o fuso da FTMO."""
+    try:
+        # Pega a hora exata do servidor da corretora pelo tick atual
+        tick = mt5.symbol_info_tick("XAUUSD") or mt5.symbol_info_tick("US100.cash")
+        if tick:
+            broker_now = datetime.fromtimestamp(tick.time)
+        else:
+            broker_now = datetime.now()
+
+        # Início do dia no fuso da corretora (00:00:00 de hoje)
+        start_of_day = datetime(broker_now.year, broker_now.month, broker_now.day, 0, 0, 0)
+        # Busca até o dia seguinte para garantir que nenhuma operação seja cortada pelo fuso
+        end_of_day = start_of_day + timedelta(days=2)
+
+        deals = mt5.history_deals_get(start_of_day, end_of_day)
+        closed_trades = []
+        wins = 0
+        losses = 0
+        realized_pnl = 0.0
+
+        if deals:
+            for d in deals:
+                # DEAL_ENTRY_OUT (1) indica fechamento de trade pelo robô (Magic 777999)
+                if d.entry == mt5.DEAL_ENTRY_OUT and (d.magic == ROBOT_MAGIC or d.magic == 777999):
+                    profit = round(d.profit + d.commission + d.swap, 2)
+                    realized_pnl += profit
+                    if profit > 0:
+                        wins += 1
+                    elif profit < 0:
+                        losses += 1
+
+                    # Tipo da operação original fechada
+                    trade_type = "SELL" if d.type == mt5.DEAL_TYPE_BUY else "BUY"
+                    closed_trades.append({
+                        "ticket": d.ticket,
+                        "symbol": d.symbol,
+                        "type": trade_type,
+                        "volume": d.volume,
+                        "profit": profit,
+                        "time": datetime.fromtimestamp(d.time).strftime("%H:%M")
+                    })
+
+        # Posições atualmente abertas
+        open_positions = []
+        positions = mt5.positions_get()
+        if positions:
+            for p in positions:
+                if p.magic == ROBOT_MAGIC or p.magic == 777999:
+                    open_positions.append({
+                        "ticket": p.ticket,
+                        "symbol": p.symbol,
+                        "type": "BUY" if p.type == mt5.POSITION_TYPE_BUY else "SELL",
+                        "volume": p.volume,
+                        "price_open": round(p.price_open, 2),
+                        "price_current": round(p.price_current, 2),
+                        "sl": round(p.sl, 2),
+                        "tp": round(p.tp, 2),
+                        "profit": round(p.profit + p.swap, 2)
+                    })
+
+        total_trades = wins + losses
+        win_rate = int((wins / total_trades) * 100) if total_trades > 0 else 0
+
+        return {
+            "total_trades": total_trades,
+            "wins": wins,
+            "losses": losses,
+            "win_rate": win_rate,
+            "realized_pnl": round(realized_pnl, 2),
+            "open_count": len(open_positions),
+            "open_positions": open_positions,
+            "closed_trades": closed_trades[-8:] # últimos trades fechados
+        }
+    except Exception as e:
+        print(f"Erro ao extrair métricas do MT5: {e}")
+        return {
+            "total_trades": 0, "wins": 0, "losses": 0, "win_rate": 0,
+            "realized_pnl": 0.0, "open_count": 0, "open_positions": [], "closed_trades": []
+        }
     
-    # 1. Puxa histórico de negócios fechados hoje
-    deals = mt5.history_deals_get(start_of_day, datetime.now())
-    closed_trades = []
-    wins = 0
-    losses = 0
-    realized_pnl = 0.0
-
-    if deals:
-        for d in deals:
-            # DEAL_ENTRY_OUT indica que a posição foi encerrada
-            if d.entry == mt5.DEAL_ENTRY_OUT and (d.magic == ROBOT_MAGIC or d.magic == 0):
-                profit = round(d.profit + d.commission + d.swap, 2)
-                realized_pnl += profit
-                if profit > 0:
-                    wins += 1
-                elif profit < 0:
-                    losses += 1
-
-                trade_type = "SELL" if d.type == mt5.DEAL_TYPE_BUY else "BUY" # inversão do deal de saída
-                closed_trades.append({
-                    "ticket": d.ticket,
-                    "symbol": d.symbol,
-                    "type": trade_type,
-                    "volume": d.volume,
-                    "profit": profit,
-                    "time": datetime.fromtimestamp(d.time).strftime("%H:%M")
-                })
-
-    # 2. Puxa posições atualmente abertas no MT5
-    open_positions = []
-    positions = mt5.positions_get()
-    if positions:
-        for p in positions:
-            if p.magic == ROBOT_MAGIC or p.magic == 0:
-                open_positions.append({
-                    "ticket": p.ticket,
-                    "symbol": p.symbol,
-                    "type": "BUY" if p.type == mt5.POSITION_TYPE_BUY else "SELL",
-                    "volume": p.volume,
-                    "price_open": round(p.price_open, 2),
-                    "price_current": round(p.price_current, 2),
-                    "sl": round(p.sl, 2),
-                    "tp": round(p.tp, 2),
-                    "profit": round(p.profit + p.swap, 2)
-                })
-
-    total_trades = wins + losses
-    win_rate = int((wins / total_trades) * 100) if total_trades > 0 else 0
-
-    return {
-        "total_trades": total_trades,
-        "wins": wins,
-        "losses": losses,
-        "win_rate": win_rate,
-        "realized_pnl": round(realized_pnl, 2),
-        "open_count": len(open_positions),
-        "open_positions": open_positions,
-        "closed_trades": closed_trades[-8:] # últimos 8 trades fechados
-    }
-
 def run_recent_backtest(engine, symbol, days=2, risk_per_trade=50.0):
     print(f"\n📊 [BACKTEST] Running institutional-grade M1 scan for {symbol} ({days}D)...")
 

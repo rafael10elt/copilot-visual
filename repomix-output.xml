@@ -1299,164 +1299,6 @@ if __name__ == "__main__":
         mt5_engine.stop()
 </file>
 
-<file path="backend/risk_manager.py">
-# risk_manager.py — Trailing Stop, Break-even, ATR, limites diários e Shadow Trading/backtest
-import pandas as pd
-import MetaTrader5 as mt5
-import math
-
-class RiskManager:
-    def __init__(self, risk_per_trade_usd=100.0, max_daily_loss_usd=400.0):
-        # Configurações globais da Mesa Proprietária
-        self.risk_per_trade_usd = risk_per_trade_usd
-        self.max_daily_loss_usd = max_daily_loss_usd
-        
-        # Estado do dia
-        self.daily_lock_active = False
-
-    def calculate_atr(self, df, period=14):
-        """Calcula o Average True Range (Volatilidade) dos últimos N candles."""
-        if len(df) < period + 1:
-            return 1.0 # Retorna valor padrão se não houver velas suficientes
-        
-        high_low = df['high'] - df['low']
-        high_close = (df['high'] - df['close'].shift(1)).abs()
-        low_close = (df['low'] - df['close'].shift(1)).abs()
-        
-        ranges = pd.concat([high_low, high_close, low_close], axis=1)
-        true_range = ranges.max(axis=1)
-        atr = true_range.rolling(window=period).mean().iloc[-1]
-        
-        return round(atr, 2)
-
-    def check_daily_limit(self, current_equity, starting_balance):
-        """Verifica se a conta atingiu a Perda Máxima Diária."""
-        drawdown = starting_balance - current_equity
-        if drawdown >= self.max_daily_loss_usd:
-            self.daily_lock_active = True
-            print(f"⛔ [HARD LOCK ATIVADO] Drawdown de ${drawdown:.2f} atingiu o limite de ${self.max_daily_loss_usd:.2f}!")
-            return True
-        return False
-
-    def get_trade_parameters(self, profile, fvg, atr, symbol, direction):
-        """
-        Gera os preços exatos de SL e TP baseados no Perfil e na Volatilidade (ATR).
-        """
-        # Distância padrão do Spread/Ruído baseada no ativo
-        buffer = 1.0 if "US100" in symbol or "NAS" in symbol else 0.3
-        
-        fvg_top = fvg['top']
-        fvg_bottom = fvg['bottom']
-        fvg_size = fvg['size']
-        
-        sl_price = 0.0
-        tp_price = 0.0
-
-        if direction == 'BUY':
-            entry_price = fvg_top # Limit order na borda superior do FVG
-            
-            if profile == 'sniper':
-                # SL colado na borda inferior do FVG + pequeno buffer. Alvo longo (1:4)
-                sl_price = fvg_bottom - buffer
-                risk = entry_price - sl_price
-                tp_price = entry_price + (risk * 4.0)
-                
-            elif profile == 'tatico':
-                # SL com respiro médio (FVG + Metade do ATR). Alvo médio (1:2.5)
-                sl_price = fvg_bottom - (atr * 0.5)
-                risk = entry_price - sl_price
-                tp_price = entry_price + (risk * 2.5)
-                
-            elif profile == 'guardiao':
-                # SL protegido pela volatilidade total (FVG + 1 ATR inteiro). Alvo curto (1:1.5)
-                sl_price = fvg_bottom - atr
-                risk = entry_price - sl_price
-                tp_price = entry_price + (risk * 1.5)
-
-        elif direction == 'SELL':
-            entry_price = fvg_bottom # Limit order na borda inferior do FVG
-            
-            if profile == 'sniper':
-                sl_price = fvg_top + buffer
-                risk = sl_price - entry_price
-                tp_price = entry_price - (risk * 4.0)
-                
-            elif profile == 'tatico':
-                sl_price = fvg_top + (atr * 0.5)
-                risk = sl_price - entry_price
-                tp_price = entry_price - (risk * 2.5)
-                
-            elif profile == 'guardiao':
-                sl_price = fvg_top + atr
-                risk = sl_price - entry_price
-                tp_price = entry_price - (risk * 1.5)
-
-        return {
-            "entry": round(entry_price, 2),
-            "sl": round(sl_price, 2),
-            "tp": round(tp_price, 2),
-            "risk_points": round(risk, 2)
-        }
-
-    def calculate_lot_size(self, symbol, risk_points):
-        """
-        Calcula o lote ideal no MT5 para arriscar exatamente X dólares.
-        Usa informações internas do ativo na corretora (Tick Value).
-        """
-        symbol_info = mt5.symbol_info(symbol)
-        if symbol_info is None:
-            return 0.01 # Lote mínimo de segurança se falhar
-            
-        tick_size = symbol_info.trade_tick_size
-        tick_value = symbol_info.trade_tick_value # Quanto vale 1 tick na moeda da conta
-        
-        if tick_size == 0 or tick_value == 0:
-            return 0.01
-            
-        # Dinheiro arriscado = (Distância em Pontos / Tick Size) * Tick Value * Lotes
-        # Isolando os Lotes: Lotes = Risco_USD / ((Risco_Pontos / Tick_Size) * Tick_Value)
-        
-        ticks_at_risk = risk_points / tick_size
-        value_at_risk_per_lot = ticks_at_risk * tick_value
-        
-        lot_size = self.risk_per_trade_usd / value_at_risk_per_lot
-        
-        # Arredondar para o step da corretora (geralmente 0.01 ou 0.1)
-        step = symbol_info.volume_step
-        lot_size = math.floor(lot_size / step) * step
-        
-        # Garantir limites da corretora
-        lot_size = max(lot_size, symbol_info.volume_min)
-        lot_size = min(lot_size, symbol_info.volume_max)
-        
-        return round(lot_size, 2)
-
-
-# =====================================================================
-# TESTE RÁPIDO DO MÓDULO DE RISCO
-# =====================================================================
-if __name__ == "__main__":
-    rm = RiskManager(risk_per_trade_usd=100.0) # Arriscando $100 por operação
-    
-    # Simulação de um FVG Bullish encontrado pelo mt5_core.py
-    fake_fvg = {'type': 'BULLISH', 'top': 20110.0, 'bottom': 20100.0, 'size': 10.0}
-    fake_atr = 15.0 # Volatilidade do momento
-    ativo = "US100"
-    
-    print("\n[MESA PROPRIETÁRIA] Cálculo de Risco para Arriscar exatos $100.00")
-    print(f"Cenário: Compra Limit em {fake_fvg['top']}, FVG Base em {fake_fvg['bottom']}, ATR: {fake_atr}")
-    print("-" * 50)
-    
-    for perfil in ['sniper', 'tatico', 'guardiao']:
-        params = rm.get_trade_parameters(perfil, fake_fvg, fake_atr, ativo, 'BUY')
-        print(f"🤖 Perfil: {perfil.upper()}")
-        print(f"  Entrada: {params['entry']}")
-        print(f"  Stop Loss: {params['sl']} (Risco: {params['risk_points']} pts)")
-        print(f"  Take Profit: {params['tp']}")
-        # Aqui simulamos o cálculo de lote (como o MT5 não tá conectado no teste isolado, mostramos a fórmula)
-        print("-" * 50)
-</file>
-
 <file path="web/src/components/LiveLogs.jsx">
 import React from 'react';
 import { Terminal, Clock, ShieldAlert } from 'lucide-react';
@@ -1529,6 +1371,154 @@ export default function LiveLogs({ logs, onClear }) {
 }
 </file>
 
+<file path="backend/risk_manager.py">
+# risk_manager.py — Trailing Stop, Break-even, ATR, limites diários e Shadow Trading/backtest
+import pandas as pd
+import MetaTrader5 as mt5
+import math
+
+class RiskManager:
+    def __init__(self, risk_per_trade_usd=100.0, max_daily_loss_usd=400.0):
+        # Configurações globais da Mesa Proprietária
+        self.risk_per_trade_usd = risk_per_trade_usd
+        self.max_daily_loss_usd = max_daily_loss_usd
+        
+        # Estado do dia
+        self.daily_lock_active = False
+
+    def calculate_atr(self, df, period=14):
+        """Calcula o Average True Range (Volatilidade) dos últimos N candles."""
+        if len(df) < period + 1:
+            return 1.0 # Retorna valor padrão se não houver velas suficientes
+        
+        high_low = df['high'] - df['low']
+        high_close = (df['high'] - df['close'].shift(1)).abs()
+        low_close = (df['low'] - df['close'].shift(1)).abs()
+        
+        ranges = pd.concat([high_low, high_close, low_close], axis=1)
+        true_range = ranges.max(axis=1)
+        atr = true_range.rolling(window=period).mean().iloc[-1]
+        
+        return round(atr, 2)
+
+    def check_daily_limit(self, current_equity, starting_balance):
+        """Verifica se a conta atingiu a Perda Máxima Diária."""
+        drawdown = starting_balance - current_equity
+        if drawdown >= self.max_daily_loss_usd:
+            self.daily_lock_active = True
+            print(f"⛔ [HARD LOCK ATIVADO] Drawdown de ${drawdown:.2f} atingiu o limite de ${self.max_daily_loss_usd:.2f}!")
+            return True
+        return False
+
+    def get_trade_parameters(self, profile, fvg, atr, symbol, direction):
+        buffer = 1.0 if "US100" in symbol or "NAS" in symbol else 0.3
+        
+        # TETO MÁXIMO DE STOP LOSS PARA SCALPING (Evita trades gigantes)
+        max_allowed_risk = 25.0 if "US100" in symbol else 3.5 # Max 25 pts na Nasdaq, Max $3.50 no Ouro
+        
+        fvg_top = fvg['top']
+        fvg_bottom = fvg['bottom']
+        
+        # Limita o tamanho do risco ao teto máximo
+        raw_risk = abs(fvg_top - fvg_bottom) + buffer
+        capped_risk = min(raw_risk, max_allowed_risk)
+        
+        if direction == 'BUY':
+            entry_price = fvg_top
+            if profile == 'sniper':
+                risk = capped_risk
+                sl_price = entry_price - risk
+                tp_price = entry_price + (risk * 4.0)
+            elif profile == 'tatico':
+                risk = min(capped_risk + (atr * 0.5), max_allowed_risk)
+                sl_price = entry_price - risk
+                tp_price = entry_price + (risk * 2.5)
+            elif profile == 'guardiao':
+                risk = min(capped_risk + atr, max_allowed_risk)
+                sl_price = entry_price - risk
+                tp_price = entry_price + (risk * 1.5)
+
+        elif direction == 'SELL':
+            entry_price = fvg_bottom
+            if profile == 'sniper':
+                risk = capped_risk
+                sl_price = entry_price + risk
+                tp_price = entry_price - (risk * 4.0)
+            elif profile == 'tatico':
+                risk = min(capped_risk + (atr * 0.5), max_allowed_risk)
+                sl_price = entry_price + risk
+                tp_price = entry_price - (risk * 2.5)
+            elif profile == 'guardiao':
+                risk = min(capped_risk + atr, max_allowed_risk)
+                sl_price = entry_price + risk
+                tp_price = entry_price - (risk * 1.5)
+
+        return {
+            "entry": round(entry_price, 2),
+            "sl": round(sl_price, 2),
+            "tp": round(tp_price, 2),
+            "risk_points": round(risk, 2)
+        }
+    
+    def calculate_lot_size(self, symbol, risk_points):
+        """
+        Calcula o lote ideal no MT5 para arriscar exatamente X dólares.
+        Usa informações internas do ativo na corretora (Tick Value).
+        """
+        symbol_info = mt5.symbol_info(symbol)
+        if symbol_info is None:
+            return 0.01 # Lote mínimo de segurança se falhar
+            
+        tick_size = symbol_info.trade_tick_size
+        tick_value = symbol_info.trade_tick_value # Quanto vale 1 tick na moeda da conta
+        
+        if tick_size == 0 or tick_value == 0:
+            return 0.01
+            
+        # Dinheiro arriscado = (Distância em Pontos / Tick Size) * Tick Value * Lotes
+        # Isolando os Lotes: Lotes = Risco_USD / ((Risco_Pontos / Tick_Size) * Tick_Value)
+        
+        ticks_at_risk = risk_points / tick_size
+        value_at_risk_per_lot = ticks_at_risk * tick_value
+        
+        lot_size = self.risk_per_trade_usd / value_at_risk_per_lot
+        
+        # Arredondar para o step da corretora (geralmente 0.01 ou 0.1)
+        step = symbol_info.volume_step
+        lot_size = math.floor(lot_size / step) * step
+        
+        # Garantir limites da corretora
+        lot_size = max(lot_size, symbol_info.volume_min)
+        lot_size = min(lot_size, symbol_info.volume_max)
+        
+        return round(lot_size, 2)
+
+
+# =====================================================================
+# TESTE RÁPIDO DO MÓDULO DE RISCO
+# =====================================================================
+if __name__ == "__main__":
+    rm = RiskManager(risk_per_trade_usd=100.0) # Arriscando $100 por operação
+    
+    # Simulação de um FVG Bullish encontrado pelo mt5_core.py
+    fake_fvg = {'type': 'BULLISH', 'top': 20110.0, 'bottom': 20100.0, 'size': 10.0}
+    fake_atr = 15.0 # Volatilidade do momento
+    ativo = "US100"
+    
+    print("\n[MESA PROPRIETÁRIA] Cálculo de Risco para Arriscar exatos $100.00")
+    print(f"Cenário: Compra Limit em {fake_fvg['top']}, FVG Base em {fake_fvg['bottom']}, ATR: {fake_atr}")
+    print("-" * 50)
+    
+    for perfil in ['sniper', 'tatico', 'guardiao']:
+        params = rm.get_trade_parameters(perfil, fake_fvg, fake_atr, ativo, 'BUY')
+        print(f"🤖 Perfil: {perfil.upper()}")
+        print(f"  Entrada: {params['entry']}")
+        print(f"  Stop Loss: {params['sl']} (Risco: {params['risk_points']} pts)")
+        print(f"  Take Profit: {params['tp']}")
+        # Aqui simulamos o cálculo de lote (como o MT5 não tá conectado no teste isolado, mostramos a fórmula)
+        print("-" * 50)
+</file>
+
 <file path="backend/supabase_client.py">
 import os
 from datetime import datetime, timezone
@@ -1552,10 +1542,10 @@ class SupabaseSync:
                 print(f"⚠️ [SUPABASE] Erro ao conectar: {e}")
                 self.enabled = False
 
-    def send_heartbeat(self, profile, pnl=0.0, login="--", balance=0.0, equity=0.0, server="--"):
+    def send_heartbeat(self, profile, pnl=0.0, login="--", balance=0.0, equity=0.0, server="--", today_stats=None):
         if not self.enabled: return
         try:
-            self.client.table("copilot_status").update({
+            payload = {
                 "is_online": True,
                 "current_profile": profile,
                 "pnl_today": round(pnl, 2),
@@ -1564,10 +1554,14 @@ class SupabaseSync:
                 "account_equity": round(equity, 2),
                 "broker": str(server),
                 "last_seen": datetime.now(timezone.utc).isoformat()
-            }).eq("id", 1).execute()
+            }
+            if today_stats:
+                payload["today_stats"] = today_stats
+
+            self.client.table("copilot_status").update(payload).eq("id", 1).execute()
         except Exception as e:
             print(f"Erro heartbeat: {e}")
-
+                  
     def add_log(self, symbol, message, level="INFO"):
         print(f"[{level}] {symbol or 'SISTEMA'}: {message}")
         if not self.enabled: return
@@ -1774,7 +1768,7 @@ export default function ControlPanel({ settings, onUpdateSettings }) {
 
 <file path="web/src/components/Dashboard.jsx">
 import React, { useState } from 'react';
-import { UserCheck, Power, Sparkles, BarChart3, AlertTriangle, X, CheckCircle2, Trophy, ArrowRight, Loader2 } from 'lucide-react';
+import { UserCheck, Power, Sparkles, BarChart3, AlertTriangle, X, CheckCircle2, Trophy, ArrowRight, Loader2, ArrowUpRight, ArrowDownRight, Activity, Clock } from 'lucide-react';
 
 export default function Dashboard({ 
   status, 
@@ -1794,6 +1788,18 @@ export default function Dashboard({
   const [selectedAsset, setSelectedAsset] = useState('US100');
   const [selectedDays, setSelectedDays] = useState(2);
 
+  const currentRiskBase = Number(settings?.risk_per_trade || 50);
+  const stats = status?.today_stats || {
+    total_trades: 0,
+    wins: 0,
+    losses: 0,
+    win_rate: 0,
+    realized_pnl: 0,
+    open_count: 0,
+    open_positions: [],
+    closed_trades: []
+  };
+
   const handleBacktestClick = () => {
     onRunBacktest(selectedDays, selectedAsset);
   };
@@ -1806,7 +1812,7 @@ export default function Dashboard({
 
   return (
     <div className="space-y-3.5 relative">
-      {/* CARD CONTA FTMO */}
+      {/* 1. CARD CONTA FTMO */}
       <div className="bg-zinc-900/90 border border-zinc-800 p-4 rounded-2xl flex items-center justify-between shadow-xl">
         <div className="flex items-center gap-3">
           <div className="p-2.5 rounded-xl bg-violet-500/10 border border-violet-500/20 text-violet-400">
@@ -1826,7 +1832,7 @@ export default function Dashboard({
         </div>
       </div>
 
-      {/* PLACAR PNL & SALDO */}
+      {/* 2. PLACAR PNL & SALDO */}
       <div className="grid grid-cols-2 gap-3">
         <div className="bg-zinc-900/90 border border-zinc-800 p-3.5 rounded-2xl shadow-lg">
           <span className="text-[10px] font-mono text-zinc-500 uppercase block">Account Balance</span>
@@ -1836,14 +1842,105 @@ export default function Dashboard({
         </div>
 
         <div className="bg-zinc-900/90 border border-zinc-800 p-3.5 rounded-2xl shadow-lg">
-          <span className="text-[10px] font-mono text-zinc-500 uppercase block">Session PNL</span>
+          <span className="text-[10px] font-mono text-zinc-500 uppercase block">Session PNL (Equity - Bal)</span>
           <strong className={`text-base font-black font-mono block mt-1 ${pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
             {pnl >= 0 ? `+$${pnl.toFixed(2)}` : `-$${Math.abs(pnl).toFixed(2)}`}
           </strong>
         </div>
       </div>
 
-      {/* SANDBOX / BACKTEST CUSTOMIZÁVEL */}
+      {/* 3. CONTADORES REAIS DO DIA (HOJE NA FTMO) */}
+      <div className="bg-zinc-900/90 border border-zinc-800 p-4 rounded-2xl shadow-xl space-y-3">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Activity size={15} className="text-emerald-400" />
+            <h4 className="text-xs font-bold text-zinc-200 uppercase font-mono">Today's Live Performance</h4>
+          </div>
+          <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-zinc-800 text-zinc-400">
+            {stats.total_trades} Closed Deals
+          </span>
+        </div>
+
+        <div className="grid grid-cols-3 gap-2 text-center">
+          <div className="bg-zinc-950 p-2.5 rounded-xl border border-zinc-800/80">
+            <span className="text-[9px] font-mono text-zinc-500 block uppercase">Win / Loss</span>
+            <strong className="text-xs font-bold font-mono text-zinc-200 mt-0.5 block">
+              <span className="text-emerald-400">{stats.wins}W</span> / <span className="text-rose-400">{stats.losses}L</span>
+            </strong>
+          </div>
+
+          <div className="bg-zinc-950 p-2.5 rounded-xl border border-zinc-800/80">
+            <span className="text-[9px] font-mono text-zinc-500 block uppercase">Win Rate</span>
+            <strong className="text-xs font-bold font-mono text-zinc-100 mt-0.5 block">
+              {stats.win_rate}%
+            </strong>
+          </div>
+
+          <div className="bg-zinc-950 p-2.5 rounded-xl border border-zinc-800/80">
+            <span className="text-[9px] font-mono text-zinc-500 block uppercase">Realized PnL</span>
+            <strong className={`text-xs font-black font-mono mt-0.5 block ${stats.realized_pnl >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
+              {stats.realized_pnl >= 0 ? `+$${stats.realized_pnl.toFixed(2)}` : `-$${Math.abs(stats.realized_pnl).toFixed(2)}`}
+            </strong>
+          </div>
+        </div>
+
+        {/* POSIÇÕES ABERTAS AGORA (AO VIVO) */}
+        <div>
+          <span className="text-[10px] font-mono text-zinc-400 uppercase tracking-wider block mb-1.5">
+            Active Positions ({stats.open_count})
+          </span>
+          {stats.open_positions && stats.open_positions.length > 0 ? (
+            <div className="space-y-1.5">
+              {stats.open_positions.map((pos) => (
+                <div key={pos.ticket} className="bg-zinc-950 border border-zinc-800 p-2.5 rounded-xl flex items-center justify-between text-[11px] font-mono">
+                  <div className="flex items-center gap-2">
+                    <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold ${pos.type === 'BUY' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-rose-500/20 text-rose-400'}`}>
+                      {pos.type}
+                    </span>
+                    <strong className="text-zinc-200">{pos.symbol}</strong>
+                    <span className="text-zinc-500">({pos.volume} lots)</span>
+                  </div>
+                  <div className="text-right">
+                    <span className={`font-bold ${pos.profit >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                      {pos.profit >= 0 ? `+$${pos.profit.toFixed(2)}` : `-$${Math.abs(pos.profit).toFixed(2)}`}
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="p-2.5 bg-zinc-950/60 border border-zinc-800/60 rounded-xl text-center text-[10px] font-mono text-zinc-500">
+              No open positions. Monitoring market for fresh FVGs...
+            </div>
+          )}
+        </div>
+
+        {/* ÚLTIMOS TRADES FECHADOS HOJE */}
+        {stats.closed_trades && stats.closed_trades.length > 0 && (
+          <div>
+            <span className="text-[10px] font-mono text-zinc-400 uppercase tracking-wider block mb-1.5">
+              Recent Closed Trades Today
+            </span>
+            <div className="space-y-1 max-h-28 overflow-y-auto pr-1">
+              {stats.closed_trades.map((deal) => (
+                <div key={deal.ticket} className="bg-zinc-950/80 border border-zinc-800/50 p-2 rounded-lg flex items-center justify-between text-[10px] font-mono">
+                  <div className="flex items-center gap-1.5">
+                    <Clock size={10} className="text-zinc-500" />
+                    <span className="text-zinc-400">{deal.time}</span>
+                    <strong className="text-zinc-300">{deal.symbol}</strong>
+                    <span className={deal.type === 'BUY' ? 'text-emerald-400' : 'text-rose-400'}>({deal.type})</span>
+                  </div>
+                  <strong className={deal.profit >= 0 ? 'text-emerald-400' : 'text-rose-400'}>
+                    {deal.profit >= 0 ? `+$${deal.profit.toFixed(2)}` : `-$${Math.abs(deal.profit).toFixed(2)}`}
+                  </strong>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* 4. SANDBOX BACKTEST */}
       <div className="bg-gradient-to-br from-zinc-900 to-zinc-950 border border-zinc-800/80 p-4 rounded-2xl space-y-3 shadow-xl">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -1859,7 +1956,6 @@ export default function Dashboard({
           )}
         </div>
 
-        {/* 1. SELETOR DE ATIVO */}
         <div>
           <span className="text-[10px] font-mono text-zinc-400 block mb-1.5 uppercase">Target Asset</span>
           <div className="grid grid-cols-2 gap-2">
@@ -1884,9 +1980,8 @@ export default function Dashboard({
           </div>
         </div>
 
-        {/* 2. SELETOR DE DIAS */}
         <div>
-          <span className="text-[10px] font-mono text-zinc-400 block mb-1.5 uppercase">Lookback Window</span>
+          <span className="text-[10px] font-mono text-zinc-400 block mb-1.5 uppercase">Lookback Window (M5 ➔ M1 Execution)</span>
           <div className="grid grid-cols-4 gap-1.5">
             {[1, 2, 3, 5].map((d) => (
               <button
@@ -1903,7 +1998,6 @@ export default function Dashboard({
           </div>
         </div>
 
-        {/* BOTÃO DISPARADOR */}
         <button
           onClick={handleBacktestClick}
           disabled={isBacktestLoading}
@@ -1911,7 +2005,7 @@ export default function Dashboard({
           {isBacktestLoading ? (
             <>
               <Loader2 size={14} className="animate-spin text-amber-400" />
-              <span>Analyzing {selectedAsset} ({selectedDays}D)...</span>
+              <span>Scanning M1 Execution for {selectedAsset} ({selectedDays}D)...</span>
             </>
           ) : (
             <>
@@ -1922,17 +2016,17 @@ export default function Dashboard({
         </button>
       </div>
 
-      {/* BOTÃO TRAVA DE EMERGÊNCIA */}
+      {/* 5. BOTÃO TRAVA DE EMERGÊNCIA */}
       <button
         onClick={() => setShowEmergencyModal(true)}
         className="w-full py-3 bg-rose-950/40 hover:bg-rose-900/60 border border-rose-800/60 text-rose-300 rounded-xl text-xs font-bold font-mono uppercase tracking-wider flex items-center justify-center gap-2 transition-all">
         <Power size={14} /> Emergency Stop (Flatten & Cancel)
       </button>
 
-      {/* MODAL 1: RELATÓRIO DO BACKTEST (COM ESTADO DE CARREGAMENTO) */}
+      {/* 6. MODAL DO BACKTEST */}
       {showReportModal && (
         <div className="fixed inset-0 bg-black/85 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-zinc-900 border border-zinc-800 w-full max-w-sm rounded-2xl p-5 shadow-2xl relative animate-in fade-in zoom-in-95 duration-150 space-y-4">
+          <div className="bg-zinc-900 border border-zinc-800 w-full max-w-md rounded-2xl p-5 shadow-2xl relative animate-in fade-in zoom-in-95 duration-150 space-y-4">
             <button
               onClick={() => setShowReportModal(false)}
               className="absolute top-4 right-4 text-zinc-500 hover:text-zinc-200">
@@ -1940,12 +2034,12 @@ export default function Dashboard({
             </button>
 
             {isBacktestLoading ? (
-              <div className="py-8 flex flex-col items-center justify-center text-center space-y-3">
-                <Loader2 size={32} className="animate-spin text-amber-400" />
+              <div className="py-10 flex flex-col items-center justify-center text-center space-y-3">
+                <Loader2 size={36} className="animate-spin text-amber-400" />
                 <div>
-                  <h3 className="text-sm font-bold text-zinc-100 font-mono">Running MT5 Sandbox</h3>
+                  <h3 className="text-sm font-bold text-zinc-100 font-mono">Simulating M1 Scalping Execution</h3>
                   <p className="text-[11px] text-zinc-400 font-mono mt-1">
-                    Scanning historical M5 candles and calculating FVG win rates...
+                    Analyzing candle-by-candle touch, Stop Loss and Target expansions...
                   </p>
                 </div>
               </div>
@@ -1957,83 +2051,159 @@ export default function Dashboard({
                   </div>
                   <div>
                     <h3 className="text-sm font-bold text-zinc-100 font-mono uppercase">
-                      {latestBacktest.symbol} Backtest
+                      {latestBacktest.symbol} Backtest Report
                     </h3>
                     <span className="text-[10px] text-zinc-400 font-mono">
-                      {latestBacktest.days} Days Window • {latestBacktest.setups} Setups Formed
+                      {latestBacktest.days} Days Window • {latestBacktest.setups} Setups Formed • Base Risk: ${latestBacktest.base_risk || currentRiskBase}
                     </span>
                   </div>
                 </div>
 
-                <div className="space-y-2">
-                  <div className={`p-2.5 rounded-xl border flex items-center justify-between ${
-                    latestBacktest.recommended === 'SNIPER'
-                      ? 'bg-amber-500/10 border-amber-500/40'
-                      : 'bg-zinc-950 border-zinc-800/70'
-                  }`}>
-                    <div>
-                      <strong className="text-xs font-bold font-mono text-zinc-200 block">SNIPER (1:4 R:R)</strong>
-                      <span className="text-[9px] text-zinc-500 font-mono">Tight SL • Long expansion target</span>
+                <div className="space-y-2.5">
+                  {latestBacktest.sniper && (
+                    <div className={`p-3 rounded-xl border ${
+                      latestBacktest.recommended === 'SNIPER'
+                        ? 'bg-amber-500/10 border-amber-500/50 shadow-lg shadow-amber-950/30'
+                        : 'bg-zinc-950 border-zinc-800/80'
+                    }`}>
+                      <div className="flex items-center justify-between mb-1.5">
+                        <div className="flex items-center gap-2">
+                          <strong className="text-xs font-bold font-mono text-amber-300">SNIPER (1:4 R:R)</strong>
+                          {latestBacktest.recommended === 'SNIPER' && (
+                            <span className="text-[9px] bg-amber-500/20 text-amber-300 px-1.5 py-0.2 rounded font-bold font-mono">
+                              BEST PNL
+                            </span>
+                          )}
+                        </div>
+                        <span className="text-xs font-black font-mono text-zinc-200">
+                          {latestBacktest.sniper.rate}% Win
+                        </span>
+                      </div>
+                      
+                      <div className="grid grid-cols-3 gap-2 text-[10px] font-mono text-zinc-400 bg-zinc-900/60 p-2 rounded-lg border border-zinc-800/60">
+                        <div>
+                          <span className="text-zinc-500 block">W / L</span>
+                          <strong className="text-zinc-200">{latestBacktest.sniper.wins}W / {latestBacktest.sniper.losses}L</strong>
+                        </div>
+                        <div>
+                          <span className="text-zinc-500 block">Net R</span>
+                          <strong className={latestBacktest.sniper.net_r >= 0 ? "text-emerald-400" : "text-rose-400"}>
+                            {latestBacktest.sniper.net_r >= 0 ? `+${latestBacktest.sniper.net_r}R` : `${latestBacktest.sniper.net_r}R`}
+                          </strong>
+                        </div>
+                        <div className="text-right">
+                          <span className="text-zinc-500 block">Est. PNL</span>
+                          <strong className={`text-xs font-black ${latestBacktest.sniper.pnl >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
+                            {latestBacktest.sniper.pnl >= 0 ? `+$${latestBacktest.sniper.pnl}` : `-$${Math.abs(latestBacktest.sniper.pnl)}`}
+                          </strong>
+                        </div>
+                      </div>
                     </div>
-                    <div className="text-right">
-                      <span className="text-sm font-black font-mono text-amber-300">{latestBacktest.sniper_rate}%</span>
-                      <span className="text-[9px] text-zinc-500 block font-mono">Win Rate</span>
-                    </div>
-                  </div>
+                  )}
 
-                  <div className={`p-2.5 rounded-xl border flex items-center justify-between ${
-                    latestBacktest.recommended === 'TACTICAL'
-                      ? 'bg-blue-500/10 border-blue-500/40'
-                      : 'bg-zinc-950 border-zinc-800/70'
-                  }`}>
-                    <div>
-                      <strong className="text-xs font-bold font-mono text-zinc-200 block">TACTICAL (1:2.5 R:R)</strong>
-                      <span className="text-[9px] text-zinc-500 font-mono">Balanced SL • Medium target</span>
-                    </div>
-                    <div className="text-right">
-                      <span className="text-sm font-black font-mono text-blue-300">{latestBacktest.tatico_rate}%</span>
-                      <span className="text-[9px] text-zinc-500 block font-mono">Win Rate</span>
-                    </div>
-                  </div>
+                  {latestBacktest.tatico && (
+                    <div className={`p-3 rounded-xl border ${
+                      latestBacktest.recommended === 'TACTICAL'
+                        ? 'bg-blue-500/10 border-blue-500/50 shadow-lg shadow-blue-950/30'
+                        : 'bg-zinc-950 border-zinc-800/80'
+                    }`}>
+                      <div className="flex items-center justify-between mb-1.5">
+                        <div className="flex items-center gap-2">
+                          <strong className="text-xs font-bold font-mono text-blue-300">TACTICAL (1:2.5 R:R)</strong>
+                          {latestBacktest.recommended === 'TACTICAL' && (
+                            <span className="text-[9px] bg-blue-500/20 text-blue-300 px-1.5 py-0.2 rounded font-bold font-mono">
+                              BEST PNL
+                            </span>
+                          )}
+                        </div>
+                        <span className="text-xs font-black font-mono text-zinc-200">
+                          {latestBacktest.tatico.rate}% Win
+                        </span>
+                      </div>
 
-                  <div className={`p-2.5 rounded-xl border flex items-center justify-between ${
-                    latestBacktest.recommended === 'GUARDIAN'
-                      ? 'bg-emerald-500/10 border-emerald-500/40'
-                      : 'bg-zinc-950 border-zinc-800/70'
-                  }`}>
-                    <div>
-                      <strong className="text-xs font-bold font-mono text-zinc-200 block">GUARDIAN (1:1.5 R:R)</strong>
-                      <span className="text-[9px] text-zinc-500 font-mono">Wide ATR SL • High hit rate</span>
+                      <div className="grid grid-cols-3 gap-2 text-[10px] font-mono text-zinc-400 bg-zinc-900/60 p-2 rounded-lg border border-zinc-800/60">
+                        <div>
+                          <span className="text-zinc-500 block">W / L</span>
+                          <strong className="text-zinc-200">{latestBacktest.tatico.wins}W / {latestBacktest.tatico.losses}L</strong>
+                        </div>
+                        <div>
+                          <span className="text-zinc-500 block">Net R</span>
+                          <strong className={latestBacktest.tatico.net_r >= 0 ? "text-emerald-400" : "text-rose-400"}>
+                            {latestBacktest.tatico.net_r >= 0 ? `+${latestBacktest.tatico.net_r}R` : `${latestBacktest.tatico.net_r}R`}
+                          </strong>
+                        </div>
+                        <div className="text-right">
+                          <span className="text-zinc-500 block">Est. PNL</span>
+                          <strong className={`text-xs font-black ${latestBacktest.tatico.pnl >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
+                            {latestBacktest.tatico.pnl >= 0 ? `+$${latestBacktest.tatico.pnl}` : `-$${Math.abs(latestBacktest.tatico.pnl)}`}
+                          </strong>
+                        </div>
+                      </div>
                     </div>
-                    <div className="text-right">
-                      <span className="text-sm font-black font-mono text-emerald-300">{latestBacktest.guardiao_rate}%</span>
-                      <span className="text-[9px] text-zinc-500 block font-mono">Win Rate</span>
+                  )}
+
+                  {latestBacktest.guardiao && (
+                    <div className={`p-3 rounded-xl border ${
+                      latestBacktest.recommended === 'GUARDIAN'
+                        ? 'bg-emerald-500/10 border-emerald-500/50 shadow-lg shadow-emerald-950/30'
+                        : 'bg-zinc-950 border-zinc-800/80'
+                    }`}>
+                      <div className="flex items-center justify-between mb-1.5">
+                        <div className="flex items-center gap-2">
+                          <strong className="text-xs font-bold font-mono text-emerald-300">GUARDIAN (1:1.5 R:R)</strong>
+                          {latestBacktest.recommended === 'GUARDIAN' && (
+                            <span className="text-[9px] bg-emerald-500/20 text-emerald-300 px-1.5 py-0.2 rounded font-bold font-mono">
+                              BEST PNL
+                            </span>
+                          )}
+                        </div>
+                        <span className="text-xs font-black font-mono text-zinc-200">
+                          {latestBacktest.guardiao.rate}% Win
+                        </span>
+                      </div>
+
+                      <div className="grid grid-cols-3 gap-2 text-[10px] font-mono text-zinc-400 bg-zinc-900/60 p-2 rounded-lg border border-zinc-800/60">
+                        <div>
+                          <span className="text-zinc-500 block">W / L</span>
+                          <strong className="text-zinc-200">{latestBacktest.guardiao.wins}W / {latestBacktest.guardiao.losses}L</strong>
+                        </div>
+                        <div>
+                          <span className="text-zinc-500 block">Net R</span>
+                          <strong className={latestBacktest.guardiao.net_r >= 0 ? "text-emerald-400" : "text-rose-400"}>
+                            {latestBacktest.guardiao.net_r >= 0 ? `+${latestBacktest.guardiao.net_r}R` : `${latestBacktest.guardiao.net_r}R`}
+                          </strong>
+                        </div>
+                        <div className="text-right">
+                          <span className="text-zinc-500 block">Est. PNL</span>
+                          <strong className={`text-xs font-black ${latestBacktest.guardiao.pnl >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
+                            {latestBacktest.guardiao.pnl >= 0 ? `+$${latestBacktest.guardiao.pnl}` : `-$${Math.abs(latestBacktest.guardiao.pnl)}`}
+                          </strong>
+                        </div>
+                      </div>
                     </div>
-                  </div>
+                  )}
                 </div>
 
                 <div className="bg-zinc-950 p-3 rounded-xl border border-zinc-800/80 flex items-center justify-between">
                   <div>
-                    <span className="text-[10px] text-zinc-500 font-mono uppercase block">Recommended Profile</span>
-                    <strong className="text-xs font-bold text-emerald-400 font-mono">{latestBacktest.recommended}</strong>
+                    <span className="text-[10px] text-zinc-500 font-mono uppercase block">Recommended Choice</span>
+                    <strong className="text-xs font-bold text-emerald-400 font-mono">
+                      {latestBacktest.recommended} (Max Net PNL)
+                    </strong>
                   </div>
                   <button
                     onClick={() => applyRecommendedProfile(latestBacktest.recommended)}
-                    className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-bold font-mono transition-all flex items-center gap-1 shadow-md">
-                    <CheckCircle2 size={13} /> Apply Profile
+                    className="px-3.5 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-bold font-mono transition-all flex items-center gap-1.5 shadow-md">
+                    <CheckCircle2 size={14} /> Apply Profile
                   </button>
                 </div>
               </>
-            ) : (
-              <div className="py-6 text-center text-zinc-400 text-xs font-mono">
-                No backtest result available yet. Click "Run Backtest" to generate one.
-              </div>
-            )}
+            ) : null}
           </div>
         </div>
       )}
 
-      {/* MODAL 2: EMERGÊNCIA */}
+      {/* 7. MODAL EMERGÊNCIA */}
       {showEmergencyModal && (
         <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-zinc-900 border border-zinc-800 w-full max-w-sm rounded-2xl p-5 shadow-2xl relative animate-in fade-in zoom-in-95 duration-150">
@@ -2103,43 +2273,66 @@ export default function App() {
   const [latestBacktest, setLatestBacktest] = useState(null);
   const [showReportModal, setShowReportModal] = useState(false);
   const [isBacktestLoading, setIsBacktestLoading] = useState(false);
-  const pollTimerRef = useRef(null);
+
+  // Trava para evitar que o modal reabra a cada heartbeat
+  const isAwaitingBacktestRef = useRef(false);
+  const lastSeenBacktestTimestampRef = useRef(null);
 
   useEffect(() => {
+    // 1. Carrega dados iniciais
     supabase.from('copilot_status').select('*').eq('id', 1).single()
-      .then(r => r.data && setStatus(r.data));
+      .then(r => {
+        if (r.data) {
+          setStatus(r.data);
+          if (r.data.last_backtest) {
+            setLatestBacktest(r.data.last_backtest);
+            lastSeenBacktestTimestampRef.current = r.data.last_backtest.timestamp;
+          }
+        }
+      });
 
     supabase.from('copilot_settings').select('*').eq('id', 1).single()
       .then(r => r.data && setSettings(r.data));
 
     supabase.from('copilot_logs').select('*').order('created_at', { ascending: false }).limit(40)
-      .then(r => {
-        if (r.data) {
-          setLogs(r.data);
-          const reportLog = r.data.find(l => l.message && l.message.startsWith('BACKTEST_RESULT:'));
-          if (reportLog) {
-            try {
-              const parsed = JSON.parse(reportLog.message.replace('BACKTEST_RESULT:', ''));
-              setLatestBacktest(parsed);
-            } catch {}
+      .then(r => r.data && setLogs(r.data));
+
+    // 2. Realtime Listener
+    const channel = supabase.channel('copilot_realtime_sync')
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'copilot_status' }, p => {
+        setStatus(p.new);
+        const bResult = p.new.last_backtest;
+
+        // SÓ abre o modal se o usuário estava explicitamente aguardando o resultado
+        // ou se chegou um timestamp novo diferente do anterior
+        if (bResult && bResult.timestamp && bResult.timestamp !== lastSeenBacktestTimestampRef.current) {
+          lastSeenBacktestTimestampRef.current = bResult.timestamp;
+          setLatestBacktest(bResult);
+          setIsBacktestLoading(false);
+
+          if (isAwaitingBacktestRef.current) {
+            isAwaitingBacktestRef.current = false;
+            setShowReportModal(true);
           }
         }
-      });
-
-    const channel = supabase.channel('copilot_realtime_sync')
-      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'copilot_status' }, p => setStatus(p.new))
-      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'copilot_settings' }, p => setSettings(p.new))
+      })
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'copilot_settings' }, p => {
+        setSettings(p.new);
+      })
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'copilot_logs' }, p => {
         setLogs(prev => [p.new, ...prev.slice(0, 45)]);
 
-        // Se chegar o resultado do Backtest via Realtime
         if (p.new.message && p.new.message.startsWith('BACKTEST_RESULT:')) {
           try {
             const parsed = JSON.parse(p.new.message.replace('BACKTEST_RESULT:', ''));
+            lastSeenBacktestTimestampRef.current = parsed.timestamp;
             setLatestBacktest(parsed);
             setIsBacktestLoading(false);
-            setShowReportModal(true);
-            if (pollTimerRef.current) clearInterval(pollTimerRef.current);
+
+            if (isAwaitingBacktestRef.current) {
+              isAwaitingBacktestRef.current = false;
+              setShowReportModal(true);
+            }
           } catch {}
         }
 
@@ -2147,10 +2340,7 @@ export default function App() {
       })
       .subscribe();
 
-    return () => {
-      supabase.removeChannel(channel);
-      if (pollTimerRef.current) clearInterval(pollTimerRef.current);
-    };
+    return () => supabase.removeChannel(channel);
   }, [soundEnabled]);
 
   const handleUpdateSettings = async (newFields) => {
@@ -2159,56 +2349,28 @@ export default function App() {
   };
 
   const handleEmergencyStop = async () => {
-    await supabase.from('copilot_logs').insert({
-      message: "EMERGENCY_STOP_TRIGGERED: Cancelling orders and flattening positions",
-      level: "DANGER"
-    });
+    await supabase.from('copilot_settings').update({ command: "EMERGENCY_STOP" }).eq('id', 1);
   };
 
- const handleRunBacktest = async (days = 2, asset = 'US100') => {
+  const handleRunBacktest = async (days = 2, asset = 'US100') => {
     const symbolTarget = asset === 'US100' ? 'US100.cash' : 'XAUUSD';
-    
-    // Abre o modal de imediato em modo de carregamento
+
+    // Sinaliza que o usuário está ativamente aguardando o teste
+    isAwaitingBacktestRef.current = true;
     setIsBacktestLoading(true);
     setShowReportModal(true);
 
-    // Envia o comando para o notebook
-    await supabase.from('copilot_logs').insert({
-      symbol: symbolTarget,
-      message: `COMMAND: RUN_BACKTEST:${symbolTarget}:${days}`,
-      level: "INFO"
-    });
+    await supabase.from('copilot_settings').update({
+      command: `RUN_BACKTEST:${symbolTarget}:${days}`
+    }).eq('id', 1);
 
-    // Polling inteligente a cada 1 segundo (com limite de 20 segundos)
-    let attempts = 0;
-    if (pollTimerRef.current) clearInterval(pollTimerRef.current);
-
-    pollTimerRef.current = setInterval(async () => {
-      attempts++;
-      
-      const { data } = await supabase.from('copilot_logs')
-        .select('*')
-        .like('message', 'BACKTEST_RESULT:%')
-        .order('created_at', { ascending: false })
-        .limit(1);
-
-      if (data && data.length > 0) {
-        try {
-          const parsed = JSON.parse(data[0].message.replace('BACKTEST_RESULT:', ''));
-          setLatestBacktest(parsed);
-          setIsBacktestLoading(false);
-          clearInterval(pollTimerRef.current);
-          return;
-        } catch (err) {
-          console.error("Erro ao parsear backtest:", err);
-        }
-      }
-
-      if (attempts >= 20) {
+    // Timeout de segurança (caso o MT5 não responda em 15s)
+    setTimeout(() => {
+      if (isAwaitingBacktestRef.current) {
+        isAwaitingBacktestRef.current = false;
         setIsBacktestLoading(false);
-        clearInterval(pollTimerRef.current);
       }
-    }, 1000);
+    }, 15000);
   };
 
   const handleClearLogs = async () => {
@@ -2312,6 +2474,7 @@ export default function App() {
 <file path="backend/main.py">
 import time
 import json
+from datetime import datetime
 import MetaTrader5 as mt5
 from mt5_core import MT5Engine, FVGDetector
 from risk_manager import RiskManager
@@ -2357,8 +2520,7 @@ def send_limit_order(symbol, action, entry_price, sl, tp, lot_size):
 
 def cancel_all_pending_orders():
     orders = mt5.orders_get()
-    if not orders:
-        return 0
+    if not orders: return 0
     cancelled = 0
     for o in orders:
         if o.magic == ROBOT_MAGIC:
@@ -2370,8 +2532,7 @@ def cancel_all_pending_orders():
 
 def close_all_open_positions():
     positions = mt5.positions_get()
-    if not positions:
-        return 0
+    if not positions: return 0
     closed = 0
     for p in positions:
         if p.magic == ROBOT_MAGIC:
@@ -2396,12 +2557,10 @@ def close_all_open_positions():
 
 def manage_open_trades(settings):
     positions = mt5.positions_get()
-    if not positions:
-        return
+    if not positions: return
 
     for p in positions:
-        if p.magic != ROBOT_MAGIC:
-            continue
+        if p.magic != ROBOT_MAGIC: continue
 
         current_price = p.price_current
         entry_price = p.price_open
@@ -2418,115 +2577,213 @@ def manage_open_trades(settings):
                     req = {"action": mt5.TRADE_ACTION_SLTP, "position": p.ticket, "sl": float(entry_price - 0.1), "tp": p.tp}
                     mt5.order_send(req)
 
-def run_recent_backtest(engine, symbol, days=2):
-    """Realiza o backtest estatístico ultrarrápido (vetorizado) com base na mecânica de scalping."""
-    print(f"\n📊 [BACKTEST] Running ultra-fast scan for {symbol} ({days}D)...")
+from datetime import datetime, timedelta
+
+def get_today_performance():
+    """Extrai os contadores reais de trades de hoje do MT5 sincronizado com o fuso da FTMO."""
+    try:
+        # Pega a hora exata do servidor da corretora pelo tick atual
+        tick = mt5.symbol_info_tick("XAUUSD") or mt5.symbol_info_tick("US100.cash")
+        if tick:
+            broker_now = datetime.fromtimestamp(tick.time)
+        else:
+            broker_now = datetime.now()
+
+        # Início do dia no fuso da corretora (00:00:00 de hoje)
+        start_of_day = datetime(broker_now.year, broker_now.month, broker_now.day, 0, 0, 0)
+        # Busca até o dia seguinte para garantir que nenhuma operação seja cortada pelo fuso
+        end_of_day = start_of_day + timedelta(days=2)
+
+        deals = mt5.history_deals_get(start_of_day, end_of_day)
+        closed_trades = []
+        wins = 0
+        losses = 0
+        realized_pnl = 0.0
+
+        if deals:
+            for d in deals:
+                # DEAL_ENTRY_OUT (1) indica fechamento de trade pelo robô (Magic 777999)
+                if d.entry == mt5.DEAL_ENTRY_OUT and (d.magic == ROBOT_MAGIC or d.magic == 777999):
+                    profit = round(d.profit + d.commission + d.swap, 2)
+                    realized_pnl += profit
+                    if profit > 0:
+                        wins += 1
+                    elif profit < 0:
+                        losses += 1
+
+                    # Tipo da operação original fechada
+                    trade_type = "SELL" if d.type == mt5.DEAL_TYPE_BUY else "BUY"
+                    closed_trades.append({
+                        "ticket": d.ticket,
+                        "symbol": d.symbol,
+                        "type": trade_type,
+                        "volume": d.volume,
+                        "profit": profit,
+                        "time": datetime.fromtimestamp(d.time).strftime("%H:%M")
+                    })
+
+        # Posições atualmente abertas
+        open_positions = []
+        positions = mt5.positions_get()
+        if positions:
+            for p in positions:
+                if p.magic == ROBOT_MAGIC or p.magic == 777999:
+                    open_positions.append({
+                        "ticket": p.ticket,
+                        "symbol": p.symbol,
+                        "type": "BUY" if p.type == mt5.POSITION_TYPE_BUY else "SELL",
+                        "volume": p.volume,
+                        "price_open": round(p.price_open, 2),
+                        "price_current": round(p.price_current, 2),
+                        "sl": round(p.sl, 2),
+                        "tp": round(p.tp, 2),
+                        "profit": round(p.profit + p.swap, 2)
+                    })
+
+        total_trades = wins + losses
+        win_rate = int((wins / total_trades) * 100) if total_trades > 0 else 0
+
+        return {
+            "total_trades": total_trades,
+            "wins": wins,
+            "losses": losses,
+            "win_rate": win_rate,
+            "realized_pnl": round(realized_pnl, 2),
+            "open_count": len(open_positions),
+            "open_positions": open_positions,
+            "closed_trades": closed_trades[-8:] # últimos trades fechados
+        }
+    except Exception as e:
+        print(f"Erro ao extrair métricas do MT5: {e}")
+        return {
+            "total_trades": 0, "wins": 0, "losses": 0, "win_rate": 0,
+            "realized_pnl": 0.0, "open_count": 0, "open_positions": [], "closed_trades": []
+        }
     
-    # 1 dia = ~240 candles de M5
-    total_candles = int(days) * 240
-    df = engine.get_candles(symbol, mt5.TIMEFRAME_M5, total_candles)
-    
-    if df is None or len(df) < 20:
-        print(f"⚠️ [BACKTEST] Candles insuficientes para {symbol}. Tentando carregar histórico...")
+def run_recent_backtest(engine, symbol, days=2, risk_per_trade=50.0):
+    print(f"\n📊 [BACKTEST] Running institutional-grade M1 scan for {symbol} ({days}D)...")
+
+    total_m5 = int(days) * 240
+    df_m5 = engine.get_candles(symbol, mt5.TIMEFRAME_M5, total_m5)
+
+    total_m1 = int(days) * 1440
+    df_m1 = engine.get_candles(symbol, mt5.TIMEFRAME_M1, total_m1)
+
+    if df_m5 is None or df_m1 is None or len(df_m5) < 20 or len(df_m1) < 100:
+        print(f"⚠️ [BACKTEST] Insufficient candles for {symbol}.")
         return None
 
-    # Converte colunas do pandas para arrays numpy para processamento em milissegundos
-    highs = df['high'].values
-    lows = df['low'].values
-    closes = df['close'].values
-    n = len(df)
+    m1_highs = df_m1['high'].values
+    m1_lows = df_m1['low'].values
+    m1_times = df_m1['time'].values
 
-    min_gap = 4.0 if "US100" in symbol else 0.5
-    spread_buffer = 1.0 if "US100" in symbol else 0.2
+    m5_highs = df_m5['high'].values
+    m5_lows = df_m5['low'].values
+    m5_times = df_m5['time'].values
+
+    is_nasdaq = "US100" in symbol
+    min_gap = 4.0 if is_nasdaq else 0.5
+    max_allowed_risk = 25.0 if is_nasdaq else 3.5
+    spread_friction = 1.2 if is_nasdaq else 0.25
 
     setups = 0
-    sniper_wins = 0
-    tatico_wins = 0
-    guardiao_wins = 0
+    sniper_wins, sniper_losses = 0, 0
+    tatico_wins, tatico_losses = 0, 0
+    guardiao_wins, guardiao_losses = 0, 0
 
-    # Varredura ultra-otimizada
-    for i in range(n - 25):
-        # Detecção de FVG (Candles i, i+1, i+2)
-        c1_high, c1_low = highs[i], lows[i]
-        c3_high, c3_low = highs[i+2], lows[i+2]
-        
-        is_buy_fvg = c3_low > c1_high and (c3_low - c1_high) >= min_gap
-        is_sell_fvg = c3_high < c1_low and (c1_low - c3_high) >= min_gap
+    in_trade_until_idx = {'sniper': 0, 'tatico': 0, 'guardiao': 0}
 
-        if not (is_buy_fvg or is_sell_fvg):
-            continue
+    for i in range(len(df_m5) - 10):
+        c1_high, c1_low = m5_highs[i], m5_lows[i]
+        c3_high, c3_low = m5_highs[i+2], m5_lows[i+2]
+        fvg_time = m5_times[i+2]
 
+        is_buy = c3_low > c1_high and (c3_low - c1_high) >= min_gap
+        is_sell = c3_high < c1_low and (c1_low - c3_high) >= min_gap
+
+        if not (is_buy or is_sell): continue
+
+        m1_start_idx = 0
+        for idx in range(len(m1_times) - 60):
+            if m1_times[idx] >= fvg_time:
+                m1_start_idx = idx
+                break
+
+        if m1_start_idx == 0: continue
+
+        raw_risk = abs(c3_low - c1_high) if is_buy else abs(c1_low - c3_high)
+        if raw_risk > (max_allowed_risk * 1.5): continue
+
+        capped_risk = min(raw_risk + spread_friction, max_allowed_risk)
         setups += 1
-        
-        if is_buy_fvg:
-            entry = c3_low
-            risk = (c3_low - c1_high) + spread_buffer
-            
-            # Janela de projeção das próximas 20 velas
-            look_highs = highs[i+3 : min(i+25, n)]
-            look_lows = lows[i+3 : min(i+25, n)]
 
-            for profile, mult in [('sniper', 4.0), ('tatico', 2.5), ('guardiao', 1.5)]:
-                tp = entry + (risk * mult)
-                sl = entry - risk
-                
-                # Checa se bateu TP antes do SL
-                win = False
-                for h, l in zip(look_highs, look_lows):
-                    if l <= sl:
-                        break # Stop atingido
-                    if h >= tp:
-                        win = True
-                        break # Take Profit atingido
+        sim_highs = m1_highs[m1_start_idx : min(m1_start_idx + 60, len(m1_highs))]
+        sim_lows = m1_lows[m1_start_idx : min(m1_start_idx + 60, len(m1_lows))]
 
-                if win:
-                    if profile == 'sniper': sniper_wins += 1
-                    elif profile == 'tatico': tatico_wins += 1
-                    elif profile == 'guardiao': guardiao_wins += 1
+        for profile, mult in [('sniper', 4.0), ('tatico', 2.5), ('guardiao', 1.5)]:
+            if m1_start_idx < in_trade_until_idx[profile]: continue
 
-        elif is_sell_fvg:
-            entry = c3_high
-            risk = (c1_low - c3_high) + spread_buffer
-            
-            look_highs = highs[i+3 : min(i+25, n)]
-            look_lows = lows[i+3 : min(i+25, n)]
+            entry = c3_low if is_buy else c3_high
+            risk = capped_risk
+            tp = entry + (risk * mult) if is_buy else entry - (risk * mult)
+            sl = entry - risk if is_buy else entry + risk
 
-            for profile, mult in [('sniper', 4.0), ('tatico', 2.5), ('guardiao', 1.5)]:
-                tp = entry - (risk * mult)
-                sl = entry + risk
+            win, loss = False, False
+            bars_taken = 0
 
-                win = False
-                for h, l in zip(look_highs, look_lows):
-                    if h >= sl:
-                        break # Stop atingido
-                    if l <= tp:
-                        win = True
-                        break # Take Profit atingido
+            for h, l in zip(sim_highs, sim_lows):
+                bars_taken += 1
+                if is_buy:
+                    if l <= sl: loss = True; break
+                    if h >= tp: win = True; break
+                else:
+                    if h >= sl: loss = True; break
+                    if l <= tp: win = True; break
 
-                if win:
-                    if profile == 'sniper': sniper_wins += 1
-                    elif profile == 'tatico': tatico_wins += 1
-                    elif profile == 'guardiao': guardiao_wins += 1
+            in_trade_until_idx[profile] = m1_start_idx + bars_taken
 
-    if setups == 0:
-        setups = 1 # Evita divisão por zero se mercado estiver em consolidação extrema
+            if win:
+                if profile == 'sniper': sniper_wins += 1
+                elif profile == 'tatico': tatico_wins += 1
+                elif profile == 'guardiao': guardiao_wins += 1
+            elif loss:
+                if profile == 'sniper': sniper_losses += 1
+                elif profile == 'tatico': tatico_losses += 1
+                elif profile == 'guardiao': guardiao_losses += 1
 
-    s_rate = int((sniper_wins / setups) * 100)
-    t_rate = int((tatico_wins / setups) * 100)
-    g_rate = int((guardiao_wins / setups) * 100)
+    if setups == 0: setups = 1
 
-    recommended = "GUARDIAN" if g_rate >= max(s_rate, t_rate) else ("TACTICAL" if t_rate >= s_rate else "SNIPER")
+    total_trades_s = sniper_wins + sniper_losses or 1
+    total_trades_t = tatico_wins + tatico_losses or 1
+    total_trades_g = guardiao_wins + guardiao_losses or 1
+
+    s_rate = int((sniper_wins / total_trades_s) * 100)
+    t_rate = int((tatico_wins / total_trades_t) * 100)
+    g_rate = int((guardiao_wins / total_trades_g) * 100)
+
+    s_net_r = round((sniper_wins * 4.0) - (sniper_losses * 1.0), 1)
+    t_net_r = round((tatico_wins * 2.5) - (tatico_losses * 1.0), 1)
+    g_net_r = round((guardiao_wins * 1.5) - (guardiao_losses * 1.0), 1)
+
+    s_pnl = round(s_net_r * risk_per_trade, 2)
+    t_pnl = round(t_net_r * risk_per_trade, 2)
+    g_pnl = round(g_net_r * risk_per_trade, 2)
+
+    if g_pnl >= max(s_pnl, t_pnl): recommended = "GUARDIAN"
+    elif t_pnl >= s_pnl: recommended = "TACTICAL"
+    else: recommended = "SNIPER"
 
     report = {
+        "timestamp": int(time.time()),
         "symbol": symbol,
         "days": days,
         "setups": setups,
-        "sniper_rate": s_rate,
-        "tatico_rate": t_rate,
-        "guardiao_rate": g_rate,
+        "base_risk": risk_per_trade,
+        "sniper": {"rate": s_rate, "wins": sniper_wins, "losses": sniper_losses, "net_r": s_net_r, "pnl": s_pnl},
+        "tatico": {"rate": t_rate, "wins": tatico_wins, "losses": tatico_losses, "net_r": t_net_r, "pnl": t_pnl},
+        "guardiao": {"rate": g_rate, "wins": guardiao_wins, "losses": guardiao_losses, "net_r": g_net_r, "pnl": g_pnl},
         "recommended": recommended
     }
-    print(f"✅ [BACKTEST COMPLETE] Setups: {setups} | Sniper: {s_rate}% | Tactical: {t_rate}% | Guardian: {g_rate}%")
     return report
 
 def get_m15_trend(engine, symbol):
@@ -2563,7 +2820,6 @@ def main():
 
     processed_fvgs = []
     last_hb = 0
-    last_cmd_id = None
     current_profile = "tatico"
     active_mode = "BOTH"
     cached_settings = {}
@@ -2572,6 +2828,7 @@ def main():
 
     try:
         while True:
+            # 1. Puxa métricas da FTMO e dados dos trades reais
             acc = mt5.account_info()
             if acc:
                 balance, equity = acc.balance, acc.equity
@@ -2580,10 +2837,13 @@ def main():
             else:
                 balance, equity, pnl_today, login, server = 0, 0, 0, "--", "--"
 
+            today_stats = get_today_performance()
+
+            # 2. Sincronização a cada 2s
             agora = time.time()
-            if agora - last_hb >= 3.0:
+            if agora - last_hb >= 2.0:
                 last_hb = agora
-                sync.send_heartbeat(current_profile, pnl_today, login, balance, equity, server)
+                sync.send_heartbeat(current_profile, pnl_today, login, balance, equity, server, today_stats)
 
                 remote = sync.check_remote_settings()
                 if remote:
@@ -2599,43 +2859,35 @@ def main():
                     if remote.get("active_symbol_mode"):
                         active_mode = remote.get("active_symbol_mode")
 
-            manage_open_trades(cached_settings)
+                    cmd = remote.get("command")
+                    if cmd:
+                        print(f"📥 [DIRECT COMMAND RECEIVED] {cmd}")
+                        try:
+                            sync.client.table("copilot_settings").update({"command": None}).eq("id", 1).execute()
+                        except: pass
 
-            # 4. LEITOR DE COMANDOS DEDICADO (FILTRO ESPECÍFICO DE COMANDO)
-            try:
-                cmd_query = sync.client.table("copilot_logs")\
-                    .select("id, message")\
-                    .ilike("message", "%COMMAND:%")\
-                    .order("created_at", {"ascending": False})\
-                    .limit(1).execute()
+                        if "RUN_BACKTEST" in cmd:
+                            parts = cmd.split(":")
+                            target_sym = parts[1] if len(parts) > 1 else "US100.cash"
+                            target_days = int(parts[2]) if len(parts) > 2 else 2
+                            user_risk = float(remote.get("risk_per_trade") or 50.0)
 
-                if cmd_query.data:
-                    cmd_entry = cmd_query.data[0]
-                    cmd_id = cmd_entry.get("id")
-                    cmd_msg = cmd_entry.get("message", "")
-
-                    if cmd_id != last_cmd_id:
-                        last_cmd_id = cmd_id
-                        print(f"📥 [COMMAND RECEIVED] {cmd_msg}")
-
-                        if "RUN_BACKTEST" in cmd_msg:
-                            parts = cmd_msg.split(":")
-                            target_sym = parts[2] if len(parts) > 2 else "US100.cash"
-                            target_days = int(parts[3]) if len(parts) > 3 else 2
-
-                            report = run_recent_backtest(engine, target_sym, target_days)
+                            report = run_recent_backtest(engine, target_sym, target_days, user_risk)
                             if report:
+                                try:
+                                    sync.client.table("copilot_status").update({"last_backtest": report}).eq("id", 1).execute()
+                                except: pass
                                 sync.add_log(target_sym, f"BACKTEST_RESULT:{json.dumps(report)}", "SUCCESS")
-                            else:
-                                sync.add_log(target_sym, "BACKTEST FAILED: Insufficient candles", "DANGER")
 
-                        elif "EMERGENCY_STOP" in cmd_msg:
+                        elif "EMERGENCY_STOP" in cmd:
                             c = cancel_all_pending_orders()
                             p = close_all_open_positions()
                             sync.add_log(None, f"EMERGENCY EXECUTED: Cancelled {c} orders, closed {p} positions", "DANGER")
-            except Exception as e:
-                pass
 
+            # 3. Gestão Ativa de Ordens (BE & Trailing)
+            manage_open_trades(cached_settings)
+
+            # 4. Ativos Ativos
             if active_mode == "US100":
                 ativos_atuais = ["US100.cash"]
             elif active_mode == "XAUUSD":
@@ -2643,6 +2895,7 @@ def main():
             else:
                 ativos_atuais = ["US100.cash", "XAUUSD"]
 
+            # 5. Varredura Operacional
             for symbol in ativos_atuais:
                 df_m5 = engine.get_candles(symbol, mt5.TIMEFRAME_M5, 30)
                 df_m1 = engine.get_candles(symbol, mt5.TIMEFRAME_M1, 15)
@@ -2683,7 +2936,7 @@ def main():
 
                         processed_fvgs.append(fvg_id)
 
-            time.sleep(3)
+            time.sleep(2)
 
     except KeyboardInterrupt:
         print("\nShutting down engine...")
