@@ -45,8 +45,7 @@ def send_limit_order(symbol, action, entry_price, sl, tp, lot_size):
 
 def cancel_all_pending_orders():
     orders = mt5.orders_get()
-    if not orders:
-        return 0
+    if not orders: return 0
     cancelled = 0
     for o in orders:
         if o.magic == ROBOT_MAGIC:
@@ -58,8 +57,7 @@ def cancel_all_pending_orders():
 
 def close_all_open_positions():
     positions = mt5.positions_get()
-    if not positions:
-        return 0
+    if not positions: return 0
     closed = 0
     for p in positions:
         if p.magic == ROBOT_MAGIC:
@@ -84,12 +82,10 @@ def close_all_open_positions():
 
 def manage_open_trades(settings):
     positions = mt5.positions_get()
-    if not positions:
-        return
+    if not positions: return
 
     for p in positions:
-        if p.magic != ROBOT_MAGIC:
-            continue
+        if p.magic != ROBOT_MAGIC: continue
 
         current_price = p.price_current
         entry_price = p.price_open
@@ -107,22 +103,31 @@ def manage_open_trades(settings):
                     mt5.order_send(req)
 
 def run_recent_backtest(engine, symbol, days=2):
-    """Realiza o backtest estatístico ultrarrápido (vetorizado) com base na mecânica de scalping."""
-    print(f"\n📊 [BACKTEST] Running ultra-fast scan for {symbol} ({days}D)...")
-    
-    # 1 dia = ~240 candles de M5
-    total_candles = int(days) * 240
-    df = engine.get_candles(symbol, mt5.TIMEFRAME_M5, total_candles)
-    
-    if df is None or len(df) < 20:
-        print(f"⚠️ [BACKTEST] Candles insuficientes para {symbol}. Tentando carregar histórico...")
+    """
+    BACKTEST DE ALTA FIDELIDADE:
+    Calcula FVGs no M5 (nível institucional) e simula o resultado no M1 (nível de execução real).
+    """
+    print(f"\n📊 [BACKTEST] Running M5->M1 realistic scalping backtest for {symbol} ({days}D)...")
+
+    # Puxa histórico de M5 para achar os FVGs
+    total_m5 = int(days) * 240
+    df_m5 = engine.get_candles(symbol, mt5.TIMEFRAME_M5, total_m5)
+
+    # Puxa histórico de M1 para simular o preço real
+    total_m1 = int(days) * 1440
+    df_m1 = engine.get_candles(symbol, mt5.TIMEFRAME_M1, total_m1)
+
+    if df_m5 is None or df_m1 is None or len(df_m5) < 20 or len(df_m1) < 100:
+        print(f"⚠️ [BACKTEST] Candles insuficientes no MT5 para {symbol}.")
         return None
 
-    # Converte colunas do pandas para arrays numpy para processamento em milissegundos
-    highs = df['high'].values
-    lows = df['low'].values
-    closes = df['close'].values
-    n = len(df)
+    m1_highs = df_m1['high'].values
+    m1_lows = df_m1['low'].values
+    m1_times = df_m1['time'].values
+
+    m5_highs = df_m5['high'].values
+    m5_lows = df_m5['low'].values
+    m5_times = df_m5['time'].values
 
     min_gap = 4.0 if "US100" in symbol else 0.5
     spread_buffer = 1.0 if "US100" in symbol else 0.2
@@ -132,64 +137,69 @@ def run_recent_backtest(engine, symbol, days=2):
     tatico_wins = 0
     guardiao_wins = 0
 
-    # Varredura ultra-otimizada
-    for i in range(n - 25):
-        # Detecção de FVG (Candles i, i+1, i+2)
-        c1_high, c1_low = highs[i], lows[i]
-        c3_high, c3_low = highs[i+2], lows[i+2]
-        
-        is_buy_fvg = c3_low > c1_high and (c3_low - c1_high) >= min_gap
-        is_sell_fvg = c3_high < c1_low and (c1_low - c3_high) >= min_gap
+    # Varre os FVGs formados no M5
+    for i in range(len(df_m5) - 10):
+        c1_high, c1_low = m5_highs[i], m5_lows[i]
+        c3_high, c3_low = m5_highs[i+2], m5_lows[i+2]
+        fvg_time = m5_times[i+2]
 
-        if not (is_buy_fvg or is_sell_fvg):
+        is_buy = c3_low > c1_high and (c3_low - c1_high) >= min_gap
+        is_sell = c3_high < c1_low and (c1_low - c3_high) >= min_gap
+
+        if not (is_buy or is_sell):
+            continue
+
+        # Encontra o índice correspondente no M1 para simulação realista
+        m1_start_idx = 0
+        for idx in range(len(m1_times) - 60):
+            if m1_times[idx] >= fvg_time:
+                m1_start_idx = idx
+                break
+
+        if m1_start_idx == 0:
             continue
 
         setups += 1
-        
-        if is_buy_fvg:
+        # Olha as próximas 60 velas de M1 (próxima 1 hora de mercado)
+        sim_highs = m1_highs[m1_start_idx : min(m1_start_idx + 60, len(m1_highs))]
+        sim_lows = m1_lows[m1_start_idx : min(m1_start_idx + 60, len(m1_lows))]
+
+        if is_buy:
             entry = c3_low
             risk = (c3_low - c1_high) + spread_buffer
-            
-            # Janela de projeção das próximas 20 velas
-            look_highs = highs[i+3 : min(i+25, n)]
-            look_lows = lows[i+3 : min(i+25, n)]
 
             for profile, mult in [('sniper', 4.0), ('tatico', 2.5), ('guardiao', 1.5)]:
                 tp = entry + (risk * mult)
                 sl = entry - risk
-                
-                # Checa se bateu TP antes do SL
                 win = False
-                for h, l in zip(look_highs, look_lows):
+
+                for h, l in zip(sim_highs, sim_lows):
                     if l <= sl:
-                        break # Stop atingido
+                        break # Stop loss atingido primeiro no M1
                     if h >= tp:
-                        win = True
-                        break # Take Profit atingido
+                        win = True # Take profit atingido primeiro no M1
+                        break
 
                 if win:
                     if profile == 'sniper': sniper_wins += 1
                     elif profile == 'tatico': tatico_wins += 1
                     elif profile == 'guardiao': guardiao_wins += 1
 
-        elif is_sell_fvg:
+        elif is_sell:
             entry = c3_high
             risk = (c1_low - c3_high) + spread_buffer
-            
-            look_highs = highs[i+3 : min(i+25, n)]
-            look_lows = lows[i+3 : min(i+25, n)]
 
             for profile, mult in [('sniper', 4.0), ('tatico', 2.5), ('guardiao', 1.5)]:
                 tp = entry - (risk * mult)
                 sl = entry + risk
-
                 win = False
-                for h, l in zip(look_highs, look_lows):
+
+                for h, l in zip(sim_highs, sim_lows):
                     if h >= sl:
-                        break # Stop atingido
+                        break # Stop loss atingido primeiro no M1
                     if l <= tp:
-                        win = True
-                        break # Take Profit atingido
+                        win = True # Take profit atingido primeiro no M1
+                        break
 
                 if win:
                     if profile == 'sniper': sniper_wins += 1
@@ -197,7 +207,7 @@ def run_recent_backtest(engine, symbol, days=2):
                     elif profile == 'guardiao': guardiao_wins += 1
 
     if setups == 0:
-        setups = 1 # Evita divisão por zero se mercado estiver em consolidação extrema
+        setups = 1
 
     s_rate = int((sniper_wins / setups) * 100)
     t_rate = int((tatico_wins / setups) * 100)
@@ -214,7 +224,7 @@ def run_recent_backtest(engine, symbol, days=2):
         "guardiao_rate": g_rate,
         "recommended": recommended
     }
-    print(f"✅ [BACKTEST COMPLETE] Setups: {setups} | Sniper: {s_rate}% | Tactical: {t_rate}% | Guardian: {g_rate}%")
+    print(f"✅ [BACKTEST COMPLETE] {symbol} ({days}D) -> Setups: {setups} | Sniper: {s_rate}% | Tactical: {t_rate}% | Guardian: {g_rate}% | Rec: {recommended}")
     return report
 
 def get_m15_trend(engine, symbol):
@@ -251,7 +261,6 @@ def main():
 
     processed_fvgs = []
     last_hb = 0
-    last_cmd_id = None
     current_profile = "tatico"
     active_mode = "BOTH"
     cached_settings = {}
@@ -260,6 +269,7 @@ def main():
 
     try:
         while True:
+            # 1. Puxa métricas da FTMO
             acc = mt5.account_info()
             if acc:
                 balance, equity = acc.balance, acc.equity
@@ -268,8 +278,9 @@ def main():
             else:
                 balance, equity, pnl_today, login, server = 0, 0, 0, "--", "--"
 
+            # 2. Sincronização e Leitura de Comandos
             agora = time.time()
-            if agora - last_hb >= 3.0:
+            if agora - last_hb >= 2.0:
                 last_hb = agora
                 sync.send_heartbeat(current_profile, pnl_today, login, balance, equity, server)
 
@@ -287,43 +298,40 @@ def main():
                     if remote.get("active_symbol_mode"):
                         active_mode = remote.get("active_symbol_mode")
 
-            manage_open_trades(cached_settings)
+                    # CANAL DIRETO DE COMANDO VIA copilot_settings
+                    cmd = remote.get("command")
+                    if cmd:
+                        print(f"📥 [DIRECT COMMAND RECEIVED] {cmd}")
+                        # Limpa o comando para não repetir
+                        try:
+                            sync.client.table("copilot_settings").update({"command": None}).eq("id", 1).execute()
+                        except: pass
 
-            # 4. LEITOR DE COMANDOS DEDICADO (FILTRO ESPECÍFICO DE COMANDO)
-            try:
-                cmd_query = sync.client.table("copilot_logs")\
-                    .select("id, message")\
-                    .ilike("message", "%COMMAND:%")\
-                    .order("created_at", {"ascending": False})\
-                    .limit(1).execute()
-
-                if cmd_query.data:
-                    cmd_entry = cmd_query.data[0]
-                    cmd_id = cmd_entry.get("id")
-                    cmd_msg = cmd_entry.get("message", "")
-
-                    if cmd_id != last_cmd_id:
-                        last_cmd_id = cmd_id
-                        print(f"📥 [COMMAND RECEIVED] {cmd_msg}")
-
-                        if "RUN_BACKTEST" in cmd_msg:
-                            parts = cmd_msg.split(":")
-                            target_sym = parts[2] if len(parts) > 2 else "US100.cash"
-                            target_days = int(parts[3]) if len(parts) > 3 else 2
+                        if "RUN_BACKTEST" in cmd:
+                            parts = cmd.split(":")
+                            target_sym = parts[1] if len(parts) > 1 else "US100.cash"
+                            target_days = int(parts[2]) if len(parts) > 2 else 2
 
                             report = run_recent_backtest(engine, target_sym, target_days)
                             if report:
+                                # Salva direto no status e também nos logs
+                                try:
+                                    sync.client.table("copilot_status").update({"last_backtest": report}).eq("id", 1).execute()
+                                except Exception as e:
+                                    print(f"Erro ao salvar backtest no status: {e}")
                                 sync.add_log(target_sym, f"BACKTEST_RESULT:{json.dumps(report)}", "SUCCESS")
                             else:
                                 sync.add_log(target_sym, "BACKTEST FAILED: Insufficient candles", "DANGER")
 
-                        elif "EMERGENCY_STOP" in cmd_msg:
+                        elif "EMERGENCY_STOP" in cmd:
                             c = cancel_all_pending_orders()
                             p = close_all_open_positions()
                             sync.add_log(None, f"EMERGENCY EXECUTED: Cancelled {c} orders, closed {p} positions", "DANGER")
-            except Exception as e:
-                pass
 
+            # 3. Gestão Ativa de Ordens Abertas (BE & Trailing)
+            manage_open_trades(cached_settings)
+
+            # 4. Ativos Ativos
             if active_mode == "US100":
                 ativos_atuais = ["US100.cash"]
             elif active_mode == "XAUUSD":
@@ -331,6 +339,7 @@ def main():
             else:
                 ativos_atuais = ["US100.cash", "XAUUSD"]
 
+            # 5. Varredura Operacional
             for symbol in ativos_atuais:
                 df_m5 = engine.get_candles(symbol, mt5.TIMEFRAME_M5, 30)
                 df_m1 = engine.get_candles(symbol, mt5.TIMEFRAME_M1, 15)
@@ -371,7 +380,7 @@ def main():
 
                         processed_fvgs.append(fvg_id)
 
-            time.sleep(3)
+            time.sleep(2)
 
     except KeyboardInterrupt:
         print("\nShutting down engine...")

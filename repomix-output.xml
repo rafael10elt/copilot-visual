@@ -1772,8 +1772,316 @@ export default function ControlPanel({ settings, onUpdateSettings }) {
 }
 </file>
 
+<file path="web/src/components/Dashboard.jsx">
+import React, { useState } from 'react';
+import { UserCheck, Power, Sparkles, BarChart3, AlertTriangle, X, CheckCircle2, Trophy, ArrowRight, Loader2 } from 'lucide-react';
+
+export default function Dashboard({ 
+  status, 
+  settings, 
+  onEmergencyStop, 
+  onRunBacktest, 
+  onUpdateSettings,
+  latestBacktest,
+  showReportModal,
+  setShowReportModal,
+  isBacktestLoading
+}) {
+  const isOnline = status?.is_online;
+  const pnl = Number(status?.pnl_today || 0);
+
+  const [showEmergencyModal, setShowEmergencyModal] = useState(false);
+  const [selectedAsset, setSelectedAsset] = useState('US100');
+  const [selectedDays, setSelectedDays] = useState(2);
+
+  const handleBacktestClick = () => {
+    onRunBacktest(selectedDays, selectedAsset);
+  };
+
+  const applyRecommendedProfile = (recommended) => {
+    const profileKey = recommended === 'GUARDIAN' ? 'guardiao' : recommended === 'SNIPER' ? 'sniper' : 'tatico';
+    onUpdateSettings({ profile: profileKey });
+    setShowReportModal(false);
+  };
+
+  return (
+    <div className="space-y-3.5 relative">
+      {/* CARD CONTA FTMO */}
+      <div className="bg-zinc-900/90 border border-zinc-800 p-4 rounded-2xl flex items-center justify-between shadow-xl">
+        <div className="flex items-center gap-3">
+          <div className="p-2.5 rounded-xl bg-violet-500/10 border border-violet-500/20 text-violet-400">
+            <UserCheck size={20} />
+          </div>
+          <div>
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-bold text-zinc-200 font-mono">FTMO #{status?.account_login || '1514861405'}</span>
+              <span className={`w-2 h-2 rounded-full ${isOnline ? 'bg-emerald-400 animate-pulse' : 'bg-rose-500'}`} />
+            </div>
+            <p className="text-[10px] text-zinc-500 font-mono">{status?.broker || 'FTMO-Demo'} • {isOnline ? 'ONLINE' : 'OFFLINE'}</p>
+          </div>
+        </div>
+        <div className="text-right">
+          <span className="text-[10px] text-zinc-500 font-mono block">EQUITY</span>
+          <strong className="text-sm font-black text-zinc-100 font-mono">${status?.account_equity || '0.00'}</strong>
+        </div>
+      </div>
+
+      {/* PLACAR PNL & SALDO */}
+      <div className="grid grid-cols-2 gap-3">
+        <div className="bg-zinc-900/90 border border-zinc-800 p-3.5 rounded-2xl shadow-lg">
+          <span className="text-[10px] font-mono text-zinc-500 uppercase block">Account Balance</span>
+          <strong className="text-base font-bold text-zinc-200 font-mono block mt-1">
+            ${status?.account_balance || '0.00'}
+          </strong>
+        </div>
+
+        <div className="bg-zinc-900/90 border border-zinc-800 p-3.5 rounded-2xl shadow-lg">
+          <span className="text-[10px] font-mono text-zinc-500 uppercase block">Session PNL</span>
+          <strong className={`text-base font-black font-mono block mt-1 ${pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+            {pnl >= 0 ? `+$${pnl.toFixed(2)}` : `-$${Math.abs(pnl).toFixed(2)}`}
+          </strong>
+        </div>
+      </div>
+
+      {/* SANDBOX / BACKTEST CUSTOMIZÁVEL */}
+      <div className="bg-gradient-to-br from-zinc-900 to-zinc-950 border border-zinc-800/80 p-4 rounded-2xl space-y-3 shadow-xl">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Sparkles size={15} className="text-amber-400" />
+            <h4 className="text-xs font-bold text-zinc-200 uppercase font-mono">Sandbox Backtest</h4>
+          </div>
+          {latestBacktest && !isBacktestLoading && (
+            <button
+              onClick={() => setShowReportModal(true)}
+              className="text-[10px] font-mono font-bold text-violet-400 hover:text-violet-300 underline flex items-center gap-1">
+              View Latest Report <ArrowRight size={10} />
+            </button>
+          )}
+        </div>
+
+        {/* 1. SELETOR DE ATIVO */}
+        <div>
+          <span className="text-[10px] font-mono text-zinc-400 block mb-1.5 uppercase">Target Asset</span>
+          <div className="grid grid-cols-2 gap-2">
+            <button
+              onClick={() => setSelectedAsset('US100')}
+              className={`py-1.5 rounded-xl text-xs font-mono font-bold border transition-all ${
+                selectedAsset === 'US100'
+                  ? 'bg-violet-500/10 border-violet-500/40 text-violet-300'
+                  : 'bg-zinc-950 border-zinc-800/80 text-zinc-500 hover:text-zinc-300'
+              }`}>
+              NASDAQ (US100)
+            </button>
+            <button
+              onClick={() => setSelectedAsset('XAUUSD')}
+              className={`py-1.5 rounded-xl text-xs font-mono font-bold border transition-all ${
+                selectedAsset === 'XAUUSD'
+                  ? 'bg-amber-500/10 border-amber-500/40 text-amber-300'
+                  : 'bg-zinc-950 border-zinc-800/80 text-zinc-500 hover:text-zinc-300'
+              }`}>
+              GOLD (XAUUSD)
+            </button>
+          </div>
+        </div>
+
+        {/* 2. SELETOR DE DIAS */}
+        <div>
+          <span className="text-[10px] font-mono text-zinc-400 block mb-1.5 uppercase">Lookback Window</span>
+          <div className="grid grid-cols-4 gap-1.5">
+            {[1, 2, 3, 5].map((d) => (
+              <button
+                key={d}
+                onClick={() => setSelectedDays(d)}
+                className={`py-1 rounded-lg text-xs font-mono font-bold border transition-all ${
+                  selectedDays === d
+                    ? 'bg-emerald-500/10 border-emerald-500/40 text-emerald-300'
+                    : 'bg-zinc-950 border-zinc-800/80 text-zinc-500 hover:text-zinc-300'
+                }`}>
+                {d}D
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* BOTÃO DISPARADOR */}
+        <button
+          onClick={handleBacktestClick}
+          disabled={isBacktestLoading}
+          className="w-full py-2.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-xs font-mono font-bold text-amber-300 border border-zinc-700 transition-all flex items-center justify-center gap-2 shadow-lg">
+          {isBacktestLoading ? (
+            <>
+              <Loader2 size={14} className="animate-spin text-amber-400" />
+              <span>Analyzing {selectedAsset} ({selectedDays}D)...</span>
+            </>
+          ) : (
+            <>
+              <BarChart3 size={14} />
+              <span>Run {selectedAsset} Backtest ({selectedDays}D)</span>
+            </>
+          )}
+        </button>
+      </div>
+
+      {/* BOTÃO TRAVA DE EMERGÊNCIA */}
+      <button
+        onClick={() => setShowEmergencyModal(true)}
+        className="w-full py-3 bg-rose-950/40 hover:bg-rose-900/60 border border-rose-800/60 text-rose-300 rounded-xl text-xs font-bold font-mono uppercase tracking-wider flex items-center justify-center gap-2 transition-all">
+        <Power size={14} /> Emergency Stop (Flatten & Cancel)
+      </button>
+
+      {/* MODAL 1: RELATÓRIO DO BACKTEST (COM ESTADO DE CARREGAMENTO) */}
+      {showReportModal && (
+        <div className="fixed inset-0 bg-black/85 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-zinc-900 border border-zinc-800 w-full max-w-sm rounded-2xl p-5 shadow-2xl relative animate-in fade-in zoom-in-95 duration-150 space-y-4">
+            <button
+              onClick={() => setShowReportModal(false)}
+              className="absolute top-4 right-4 text-zinc-500 hover:text-zinc-200">
+              <X size={18} />
+            </button>
+
+            {isBacktestLoading ? (
+              <div className="py-8 flex flex-col items-center justify-center text-center space-y-3">
+                <Loader2 size={32} className="animate-spin text-amber-400" />
+                <div>
+                  <h3 className="text-sm font-bold text-zinc-100 font-mono">Running MT5 Sandbox</h3>
+                  <p className="text-[11px] text-zinc-400 font-mono mt-1">
+                    Scanning historical M5 candles and calculating FVG win rates...
+                  </p>
+                </div>
+              </div>
+            ) : latestBacktest ? (
+              <>
+                <div className="flex items-center gap-3">
+                  <div className="p-2.5 bg-amber-500/10 border border-amber-500/20 text-amber-400 rounded-xl">
+                    <Trophy size={22} />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-bold text-zinc-100 font-mono uppercase">
+                      {latestBacktest.symbol} Backtest
+                    </h3>
+                    <span className="text-[10px] text-zinc-400 font-mono">
+                      {latestBacktest.days} Days Window • {latestBacktest.setups} Setups Formed
+                    </span>
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  <div className={`p-2.5 rounded-xl border flex items-center justify-between ${
+                    latestBacktest.recommended === 'SNIPER'
+                      ? 'bg-amber-500/10 border-amber-500/40'
+                      : 'bg-zinc-950 border-zinc-800/70'
+                  }`}>
+                    <div>
+                      <strong className="text-xs font-bold font-mono text-zinc-200 block">SNIPER (1:4 R:R)</strong>
+                      <span className="text-[9px] text-zinc-500 font-mono">Tight SL • Long expansion target</span>
+                    </div>
+                    <div className="text-right">
+                      <span className="text-sm font-black font-mono text-amber-300">{latestBacktest.sniper_rate}%</span>
+                      <span className="text-[9px] text-zinc-500 block font-mono">Win Rate</span>
+                    </div>
+                  </div>
+
+                  <div className={`p-2.5 rounded-xl border flex items-center justify-between ${
+                    latestBacktest.recommended === 'TACTICAL'
+                      ? 'bg-blue-500/10 border-blue-500/40'
+                      : 'bg-zinc-950 border-zinc-800/70'
+                  }`}>
+                    <div>
+                      <strong className="text-xs font-bold font-mono text-zinc-200 block">TACTICAL (1:2.5 R:R)</strong>
+                      <span className="text-[9px] text-zinc-500 font-mono">Balanced SL • Medium target</span>
+                    </div>
+                    <div className="text-right">
+                      <span className="text-sm font-black font-mono text-blue-300">{latestBacktest.tatico_rate}%</span>
+                      <span className="text-[9px] text-zinc-500 block font-mono">Win Rate</span>
+                    </div>
+                  </div>
+
+                  <div className={`p-2.5 rounded-xl border flex items-center justify-between ${
+                    latestBacktest.recommended === 'GUARDIAN'
+                      ? 'bg-emerald-500/10 border-emerald-500/40'
+                      : 'bg-zinc-950 border-zinc-800/70'
+                  }`}>
+                    <div>
+                      <strong className="text-xs font-bold font-mono text-zinc-200 block">GUARDIAN (1:1.5 R:R)</strong>
+                      <span className="text-[9px] text-zinc-500 font-mono">Wide ATR SL • High hit rate</span>
+                    </div>
+                    <div className="text-right">
+                      <span className="text-sm font-black font-mono text-emerald-300">{latestBacktest.guardiao_rate}%</span>
+                      <span className="text-[9px] text-zinc-500 block font-mono">Win Rate</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="bg-zinc-950 p-3 rounded-xl border border-zinc-800/80 flex items-center justify-between">
+                  <div>
+                    <span className="text-[10px] text-zinc-500 font-mono uppercase block">Recommended Profile</span>
+                    <strong className="text-xs font-bold text-emerald-400 font-mono">{latestBacktest.recommended}</strong>
+                  </div>
+                  <button
+                    onClick={() => applyRecommendedProfile(latestBacktest.recommended)}
+                    className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-bold font-mono transition-all flex items-center gap-1 shadow-md">
+                    <CheckCircle2 size={13} /> Apply Profile
+                  </button>
+                </div>
+              </>
+            ) : (
+              <div className="py-6 text-center text-zinc-400 text-xs font-mono">
+                No backtest result available yet. Click "Run Backtest" to generate one.
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* MODAL 2: EMERGÊNCIA */}
+      {showEmergencyModal && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-zinc-900 border border-zinc-800 w-full max-w-sm rounded-2xl p-5 shadow-2xl relative animate-in fade-in zoom-in-95 duration-150">
+            <button
+              onClick={() => setShowEmergencyModal(false)}
+              className="absolute top-4 right-4 text-zinc-500 hover:text-zinc-200">
+              <X size={18} />
+            </button>
+
+            <div className="flex items-center gap-3 mb-3">
+              <div className="p-2.5 bg-rose-500/10 border border-rose-500/20 text-rose-400 rounded-xl">
+                <AlertTriangle size={22} />
+              </div>
+              <div>
+                <h3 className="text-sm font-bold text-zinc-100 font-mono">Emergency Stop</h3>
+                <span className="text-[10px] text-zinc-400 font-mono">Immediate execution</span>
+              </div>
+            </div>
+
+            <p className="text-xs text-zinc-300 mb-5 leading-relaxed bg-zinc-950/60 p-3 rounded-xl border border-zinc-800/60">
+              This will immediately cancel all pending orders and close all open positions on MetaTrader 5.
+            </p>
+
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                onClick={() => setShowEmergencyModal(false)}
+                className="py-2.5 rounded-xl border border-zinc-800 bg-zinc-800/60 hover:bg-zinc-800 text-xs font-bold text-zinc-300">
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  setShowEmergencyModal(false);
+                  onEmergencyStop();
+                }}
+                className="py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-xs font-bold text-white shadow-lg shadow-rose-900/50">
+                Confirm
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+</file>
+
 <file path="web/src/App.jsx">
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { createClient } from '@supabase/supabase-js';
 import { Zap, LayoutDashboard, Sliders, ScrollText, Volume2, VolumeX } from 'lucide-react';
 import Dashboard from './components/Dashboard';
@@ -1791,9 +2099,11 @@ export default function App() {
   const [logs, setLogs] = useState([]);
   const [soundEnabled, setSoundEnabled] = useState(false);
 
-  // Estados do Modal de Relatório do Backtest
+  // Estados do Modal e Backtest
   const [latestBacktest, setLatestBacktest] = useState(null);
   const [showReportModal, setShowReportModal] = useState(false);
+  const [isBacktestLoading, setIsBacktestLoading] = useState(false);
+  const pollTimerRef = useRef(null);
 
   useEffect(() => {
     supabase.from('copilot_status').select('*').eq('id', 1).single()
@@ -1806,7 +2116,6 @@ export default function App() {
       .then(r => {
         if (r.data) {
           setLogs(r.data);
-          // Procura o último relatório de backtest no histórico
           const reportLog = r.data.find(l => l.message && l.message.startsWith('BACKTEST_RESULT:'));
           if (reportLog) {
             try {
@@ -1823,12 +2132,14 @@ export default function App() {
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'copilot_logs' }, p => {
         setLogs(prev => [p.new, ...prev.slice(0, 45)]);
 
-        // Se chegar o resultado do Backtest em tempo real, abre o modal!
+        // Se chegar o resultado do Backtest via Realtime
         if (p.new.message && p.new.message.startsWith('BACKTEST_RESULT:')) {
           try {
             const parsed = JSON.parse(p.new.message.replace('BACKTEST_RESULT:', ''));
             setLatestBacktest(parsed);
-            setShowReportModal(true); // Abre o modal automaticamente!
+            setIsBacktestLoading(false);
+            setShowReportModal(true);
+            if (pollTimerRef.current) clearInterval(pollTimerRef.current);
           } catch {}
         }
 
@@ -1836,7 +2147,10 @@ export default function App() {
       })
       .subscribe();
 
-    return () => supabase.removeChannel(channel);
+    return () => {
+      supabase.removeChannel(channel);
+      if (pollTimerRef.current) clearInterval(pollTimerRef.current);
+    };
   }, [soundEnabled]);
 
   const handleUpdateSettings = async (newFields) => {
@@ -1851,13 +2165,50 @@ export default function App() {
     });
   };
 
-  const handleRunBacktest = async (days = 2, asset = 'US100') => {
+ const handleRunBacktest = async (days = 2, asset = 'US100') => {
     const symbolTarget = asset === 'US100' ? 'US100.cash' : 'XAUUSD';
+    
+    // Abre o modal de imediato em modo de carregamento
+    setIsBacktestLoading(true);
+    setShowReportModal(true);
+
+    // Envia o comando para o notebook
     await supabase.from('copilot_logs').insert({
       symbol: symbolTarget,
       message: `COMMAND: RUN_BACKTEST:${symbolTarget}:${days}`,
       level: "INFO"
     });
+
+    // Polling inteligente a cada 1 segundo (com limite de 20 segundos)
+    let attempts = 0;
+    if (pollTimerRef.current) clearInterval(pollTimerRef.current);
+
+    pollTimerRef.current = setInterval(async () => {
+      attempts++;
+      
+      const { data } = await supabase.from('copilot_logs')
+        .select('*')
+        .like('message', 'BACKTEST_RESULT:%')
+        .order('created_at', { ascending: false })
+        .limit(1);
+
+      if (data && data.length > 0) {
+        try {
+          const parsed = JSON.parse(data[0].message.replace('BACKTEST_RESULT:', ''));
+          setLatestBacktest(parsed);
+          setIsBacktestLoading(false);
+          clearInterval(pollTimerRef.current);
+          return;
+        } catch (err) {
+          console.error("Erro ao parsear backtest:", err);
+        }
+      }
+
+      if (attempts >= 20) {
+        setIsBacktestLoading(false);
+        clearInterval(pollTimerRef.current);
+      }
+    }, 1000);
   };
 
   const handleClearLogs = async () => {
@@ -1937,6 +2288,7 @@ export default function App() {
             latestBacktest={latestBacktest}
             showReportModal={showReportModal}
             setShowReportModal={setShowReportModal}
+            isBacktestLoading={isBacktestLoading}
           />
         )}
         {tab === 'controls' && (
@@ -1969,7 +2321,6 @@ from supabase_client import SupabaseSync
 ROBOT_MAGIC = 777999
 
 def get_best_filling_mode(symbol):
-    """Detects whether broker/FTMO supports IOC, FOK, or RETURN for the asset."""
     info = mt5.symbol_info(symbol)
     if not info:
         return mt5.ORDER_FILLING_IOC
@@ -1981,7 +2332,6 @@ def get_best_filling_mode(symbol):
     return mt5.ORDER_FILLING_RETURN
 
 def send_limit_order(symbol, action, entry_price, sl, tp, lot_size):
-    """Sends Buy Limit or Sell Limit order to MT5."""
     order_type = mt5.ORDER_TYPE_BUY_LIMIT if action == "BUY_LIMIT" else mt5.ORDER_TYPE_SELL_LIMIT
     filling = get_best_filling_mode(symbol)
 
@@ -2006,7 +2356,6 @@ def send_limit_order(symbol, action, entry_price, sl, tp, lot_size):
     return True
 
 def cancel_all_pending_orders():
-    """Cancels all pending orders placed by the robot."""
     orders = mt5.orders_get()
     if not orders:
         return 0
@@ -2020,7 +2369,6 @@ def cancel_all_pending_orders():
     return cancelled
 
 def close_all_open_positions():
-    """Closes all open positions placed by the robot at market price."""
     positions = mt5.positions_get()
     if not positions:
         return 0
@@ -2047,7 +2395,6 @@ def close_all_open_positions():
     return closed
 
 def manage_open_trades(settings):
-    """Active position management: Break-even and Trailing Stop on M1."""
     positions = mt5.positions_get()
     if not positions:
         return
@@ -2060,95 +2407,117 @@ def manage_open_trades(settings):
         entry_price = p.price_open
         sl = p.sl
 
-        # 1. Break-even logic (move SL to entry price once trade moves in profit)
         if settings.get("breakeven_enabled"):
             buffer = 2.0 if "US100" in p.symbol else 0.5
             if p.type == mt5.POSITION_TYPE_BUY:
                 if current_price >= (entry_price + buffer) and sl < entry_price:
-                    req = {
-                        "action": mt5.TRADE_ACTION_SLTP,
-                        "position": p.ticket,
-                        "sl": float(entry_price + 0.1),
-                        "tp": p.tp
-                    }
+                    req = {"action": mt5.TRADE_ACTION_SLTP, "position": p.ticket, "sl": float(entry_price + 0.1), "tp": p.tp}
                     mt5.order_send(req)
             elif p.type == mt5.POSITION_TYPE_SELL:
                 if current_price <= (entry_price - buffer) and sl > entry_price:
-                    req = {
-                        "action": mt5.TRADE_ACTION_SLTP,
-                        "position": p.ticket,
-                        "sl": float(entry_price - 0.1),
-                        "tp": p.tp
-                    }
+                    req = {"action": mt5.TRADE_ACTION_SLTP, "position": p.ticket, "sl": float(entry_price - 0.1), "tp": p.tp}
                     mt5.order_send(req)
 
 def run_recent_backtest(engine, symbol, days=2):
-    """Performs statistical backtest and returns structured JSON for the Web Modal."""
-    candles_per_day = 240
-    total_candles = int(days) * candles_per_day
-
+    """Realiza o backtest estatístico ultrarrápido (vetorizado) com base na mecânica de scalping."""
+    print(f"\n📊 [BACKTEST] Running ultra-fast scan for {symbol} ({days}D)...")
+    
+    # 1 dia = ~240 candles de M5
+    total_candles = int(days) * 240
     df = engine.get_candles(symbol, mt5.TIMEFRAME_M5, total_candles)
-    if df is None or len(df) < 50:
+    
+    if df is None or len(df) < 20:
+        print(f"⚠️ [BACKTEST] Candles insuficientes para {symbol}. Tentando carregar histórico...")
         return None
 
+    # Converte colunas do pandas para arrays numpy para processamento em milissegundos
+    highs = df['high'].values
+    lows = df['low'].values
+    closes = df['close'].values
+    n = len(df)
+
     min_gap = 4.0 if "US100" in symbol else 0.5
+    spread_buffer = 1.0 if "US100" in symbol else 0.2
+
     setups = 0
     sniper_wins = 0
     tatico_wins = 0
     guardiao_wins = 0
 
-    for i in range(len(df) - 20):
-        c1, c2, c3 = df.iloc[i], df.iloc[i+1], df.iloc[i+2]
-        fvg_type = None
-        entry, sl_base = 0.0, 0.0
+    # Varredura ultra-otimizada
+    for i in range(n - 25):
+        # Detecção de FVG (Candles i, i+1, i+2)
+        c1_high, c1_low = highs[i], lows[i]
+        c3_high, c3_low = highs[i+2], lows[i+2]
+        
+        is_buy_fvg = c3_low > c1_high and (c3_low - c1_high) >= min_gap
+        is_sell_fvg = c3_high < c1_low and (c1_low - c3_high) >= min_gap
 
-        if c3['low'] > c1['high'] and (c3['low'] - c1['high']) >= min_gap:
-            fvg_type = 'BUY'
-            entry = float(c3['low'])
-            sl_base = float(c1['high'])
-        elif c3['high'] < c1['low'] and (c1['low'] - c3['high']) >= min_gap:
-            fvg_type = 'SELL'
-            entry = float(c3['high'])
-            sl_base = float(c1['low'])
+        if not (is_buy_fvg or is_sell_fvg):
+            continue
 
-        if fvg_type:
-            setups += 1
-            risk = abs(entry - sl_base) + (1.0 if "US100" in symbol else 0.2)
-            future = df.iloc[i+3 : min(i+30, len(df))]
+        setups += 1
+        
+        if is_buy_fvg:
+            entry = c3_low
+            risk = (c3_low - c1_high) + spread_buffer
+            
+            # Janela de projeção das próximas 20 velas
+            look_highs = highs[i+3 : min(i+25, n)]
+            look_lows = lows[i+3 : min(i+25, n)]
 
             for profile, mult in [('sniper', 4.0), ('tatico', 2.5), ('guardiao', 1.5)]:
-                tp = entry + (risk * mult) if fvg_type == 'BUY' else entry - (risk * mult)
-                sl = entry - risk if fvg_type == 'BUY' else entry + risk
+                tp = entry + (risk * mult)
+                sl = entry - risk
+                
+                # Checa se bateu TP antes do SL
+                win = False
+                for h, l in zip(look_highs, look_lows):
+                    if l <= sl:
+                        break # Stop atingido
+                    if h >= tp:
+                        win = True
+                        break # Take Profit atingido
 
-                hit_tp, hit_sl = False, False
-                for _, bar in future.iterrows():
-                    if fvg_type == 'BUY':
-                        if bar['low'] <= sl:
-                            hit_sl = True
-                            break
-                        if bar['high'] >= tp:
-                            hit_tp = True
-                            break
-                    else:
-                        if bar['high'] >= sl:
-                            hit_sl = True
-                            break
-                        if bar['low'] <= tp:
-                            hit_tp = True
-                            break
-
-                if hit_tp and not hit_sl:
+                if win:
                     if profile == 'sniper': sniper_wins += 1
                     elif profile == 'tatico': tatico_wins += 1
                     elif profile == 'guardiao': guardiao_wins += 1
 
-    s_rate = int((sniper_wins / setups) * 100) if setups > 0 else 0
-    t_rate = int((tatico_wins / setups) * 100) if setups > 0 else 0
-    g_rate = int((guardiao_wins / setups) * 100) if setups > 0 else 0
+        elif is_sell_fvg:
+            entry = c3_high
+            risk = (c1_low - c3_high) + spread_buffer
+            
+            look_highs = highs[i+3 : min(i+25, n)]
+            look_lows = lows[i+3 : min(i+25, n)]
+
+            for profile, mult in [('sniper', 4.0), ('tatico', 2.5), ('guardiao', 1.5)]:
+                tp = entry - (risk * mult)
+                sl = entry + risk
+
+                win = False
+                for h, l in zip(look_highs, look_lows):
+                    if h >= sl:
+                        break # Stop atingido
+                    if l <= tp:
+                        win = True
+                        break # Take Profit atingido
+
+                if win:
+                    if profile == 'sniper': sniper_wins += 1
+                    elif profile == 'tatico': tatico_wins += 1
+                    elif profile == 'guardiao': guardiao_wins += 1
+
+    if setups == 0:
+        setups = 1 # Evita divisão por zero se mercado estiver em consolidação extrema
+
+    s_rate = int((sniper_wins / setups) * 100)
+    t_rate = int((tatico_wins / setups) * 100)
+    g_rate = int((guardiao_wins / setups) * 100)
 
     recommended = "GUARDIAN" if g_rate >= max(s_rate, t_rate) else ("TACTICAL" if t_rate >= s_rate else "SNIPER")
 
-    report_payload = {
+    report = {
         "symbol": symbol,
         "days": days,
         "setups": setups,
@@ -2157,16 +2526,15 @@ def run_recent_backtest(engine, symbol, days=2):
         "guardiao_rate": g_rate,
         "recommended": recommended
     }
-    return report_payload
+    print(f"✅ [BACKTEST COMPLETE] Setups: {setups} | Sniper: {s_rate}% | Tactical: {t_rate}% | Guardian: {g_rate}%")
+    return report
 
 def get_m15_trend(engine, symbol):
     df_m15 = engine.get_candles(symbol, mt5.TIMEFRAME_M15, 20)
-    if df_m15 is None:
-        return "NEUTRAL"
+    if df_m15 is None: return "NEUTRAL"
     return "UPTREND" if df_m15.iloc[-1]['close'] > df_m15.iloc[0]['close'] else "DOWNTREND"
 
 def is_fvg_close_enough(current_price, entry_price, tp_price, action, symbol):
-    """Proximity check: Avoids arming setups if price moved too far or already hit TP."""
     dist = abs(current_price - entry_price)
     max_dist = 25.0 if "US100" in symbol else 3.5
 
@@ -2186,8 +2554,7 @@ def main():
     print("=======================================")
 
     engine = MT5Engine()
-    if not engine.start():
-        return
+    if not engine.start(): return
 
     fvg_detector = FVGDetector()
     risk_manager = RiskManager()
@@ -2205,7 +2572,6 @@ def main():
 
     try:
         while True:
-            # 1. Fetch live FTMO account metrics
             acc = mt5.account_info()
             if acc:
                 balance, equity = acc.balance, acc.equity
@@ -2214,7 +2580,6 @@ def main():
             else:
                 balance, equity, pnl_today, login, server = 0, 0, 0, "--", "--"
 
-            # 2. Remote synchronization every 3 seconds
             agora = time.time()
             if agora - last_hb >= 3.0:
                 last_hb = agora
@@ -2234,46 +2599,43 @@ def main():
                     if remote.get("active_symbol_mode"):
                         active_mode = remote.get("active_symbol_mode")
 
-                    # AI Auto-Adapt check: adjust profile dynamically
-                    if remote.get("auto_profile_ia") and current_profile != "tatico":
-                        current_profile = "tatico"
-                        sync.add_log(None, "AI Auto-Adapt active: Defaulting to TACTICAL profile", "INFO")
-
-            # 3. Active Management of Open Trades (BE & Trailing)
             manage_open_trades(cached_settings)
 
-            # 4. Check for Remote Commands from Web App
+            # 4. LEITOR DE COMANDOS DEDICADO (FILTRO ESPECÍFICO DE COMANDO)
             try:
-                latest_logs = sync.client.table("copilot_logs").select("id, message").order("created_at", {"ascending": False}).limit(1).execute()
-                if latest_logs.data:
-                    cmd_entry = latest_logs.data[0]
+                cmd_query = sync.client.table("copilot_logs")\
+                    .select("id, message")\
+                    .ilike("message", "%COMMAND:%")\
+                    .order("created_at", {"ascending": False})\
+                    .limit(1).execute()
+
+                if cmd_query.data:
+                    cmd_entry = cmd_query.data[0]
                     cmd_id = cmd_entry.get("id")
-                    last_msg = cmd_entry.get("message", "")
+                    cmd_msg = cmd_entry.get("message", "")
 
                     if cmd_id != last_cmd_id:
-                        # EMERGENCY STOP COMMAND
-                        if "EMERGENCY_STOP_TRIGGERED" in last_msg:
-                            last_cmd_id = cmd_id
-                            cancelled = cancel_all_pending_orders()
-                            closed = close_all_open_positions()
-                            sync.add_log(None, f"EMERGENCY EXECUTED: Cancelled {cancelled} orders, closed {closed} positions", "DANGER")
+                        last_cmd_id = cmd_id
+                        print(f"📥 [COMMAND RECEIVED] {cmd_msg}")
 
-                        # DYNAMIC BACKTEST COMMAND
-                        elif "COMMAND: RUN_BACKTEST" in last_msg:
-                            last_cmd_id = cmd_id
-                            parts = last_msg.split(":")
+                        if "RUN_BACKTEST" in cmd_msg:
+                            parts = cmd_msg.split(":")
                             target_sym = parts[2] if len(parts) > 2 else "US100.cash"
                             target_days = int(parts[3]) if len(parts) > 3 else 2
 
-                            report_json = run_recent_backtest(engine, target_sym, target_days)
-                            if report_json:
-                                sync.add_log(target_sym, f"BACKTEST_RESULT:{json.dumps(report_json)}", "SUCCESS")
+                            report = run_recent_backtest(engine, target_sym, target_days)
+                            if report:
+                                sync.add_log(target_sym, f"BACKTEST_RESULT:{json.dumps(report)}", "SUCCESS")
                             else:
-                                sync.add_log(target_sym, "BACKTEST FAILED: Insufficient data", "DANGER")
-            except Exception:
+                                sync.add_log(target_sym, "BACKTEST FAILED: Insufficient candles", "DANGER")
+
+                        elif "EMERGENCY_STOP" in cmd_msg:
+                            c = cancel_all_pending_orders()
+                            p = close_all_open_positions()
+                            sync.add_log(None, f"EMERGENCY EXECUTED: Cancelled {c} orders, closed {p} positions", "DANGER")
+            except Exception as e:
                 pass
 
-            # 5. Asset targets selection
             if active_mode == "US100":
                 ativos_atuais = ["US100.cash"]
             elif active_mode == "XAUUSD":
@@ -2281,12 +2643,10 @@ def main():
             else:
                 ativos_atuais = ["US100.cash", "XAUUSD"]
 
-            # 6. Scanning loop
             for symbol in ativos_atuais:
                 df_m5 = engine.get_candles(symbol, mt5.TIMEFRAME_M5, 30)
                 df_m1 = engine.get_candles(symbol, mt5.TIMEFRAME_M1, 15)
-                if df_m5 is None or df_m1 is None:
-                    continue
+                if df_m5 is None or df_m1 is None: continue
 
                 current_price = df_m1.iloc[-1]['close']
                 fvgs = fvg_detector.find_unmitigated_fvgs(df_m5, symbol)
@@ -2302,7 +2662,6 @@ def main():
 
                         params = risk_manager.get_trade_parameters(current_profile, fvg, atr_m1, symbol, direction)
 
-                        # Distance & Target Filter
                         valid, dist_msg = is_fvg_close_enough(current_price, params["entry"], params["tp"], action_candidate, symbol)
                         if not valid:
                             processed_fvgs.append(fvg_id)
@@ -2333,295 +2692,6 @@ def main():
 
 if __name__ == "__main__":
     main()
-</file>
-
-<file path="web/src/components/Dashboard.jsx">
-import React, { useState } from 'react';
-import { UserCheck, Power, Sparkles, BarChart3, AlertTriangle, X, CheckCircle2, Trophy, ArrowRight } from 'lucide-react';
-
-export default function Dashboard({ 
-  status, 
-  settings, 
-  onEmergencyStop, 
-  onRunBacktest, 
-  onUpdateSettings,
-  latestBacktest,
-  showReportModal,
-  setShowReportModal
-}) {
-  const isOnline = status?.is_online;
-  const pnl = Number(status?.pnl_today || 0);
-
-  const [showEmergencyModal, setShowEmergencyModal] = useState(false);
-  const [selectedAsset, setSelectedAsset] = useState('US100');
-  const [selectedDays, setSelectedDays] = useState(2);
-  const [isRunningBacktest, setIsRunningBacktest] = useState(false);
-
-  const handleBacktestClick = async () => {
-    setIsRunningBacktest(true);
-    await onRunBacktest(selectedDays, selectedAsset);
-    setTimeout(() => setIsRunningBacktest(false), 2500);
-  };
-
-  const applyRecommendedProfile = (recommended) => {
-    const profileKey = recommended === 'GUARDIAN' ? 'guardiao' : recommended === 'SNIPER' ? 'sniper' : 'tatico';
-    onUpdateSettings({ profile: profileKey });
-    setShowReportModal(false);
-  };
-
-  return (
-    <div className="space-y-3.5 relative">
-      {/* CARD CONTA FTMO */}
-      <div className="bg-zinc-900/90 border border-zinc-800 p-4 rounded-2xl flex items-center justify-between shadow-xl">
-        <div className="flex items-center gap-3">
-          <div className="p-2.5 rounded-xl bg-violet-500/10 border border-violet-500/20 text-violet-400">
-            <UserCheck size={20} />
-          </div>
-          <div>
-            <div className="flex items-center gap-2">
-              <span className="text-xs font-bold text-zinc-200 font-mono">FTMO #{status?.account_login || '1514861405'}</span>
-              <span className={`w-2 h-2 rounded-full ${isOnline ? 'bg-emerald-400 animate-pulse' : 'bg-rose-500'}`} />
-            </div>
-            <p className="text-[10px] text-zinc-500 font-mono">{status?.broker || 'FTMO-Demo'} • {isOnline ? 'ONLINE' : 'OFFLINE'}</p>
-          </div>
-        </div>
-        <div className="text-right">
-          <span className="text-[10px] text-zinc-500 font-mono block">EQUITY</span>
-          <strong className="text-sm font-black text-zinc-100 font-mono">${status?.account_equity || '0.00'}</strong>
-        </div>
-      </div>
-
-      {/* PLACAR PNL & SALDO */}
-      <div className="grid grid-cols-2 gap-3">
-        <div className="bg-zinc-900/90 border border-zinc-800 p-3.5 rounded-2xl shadow-lg">
-          <span className="text-[10px] font-mono text-zinc-500 uppercase block">Account Balance</span>
-          <strong className="text-base font-bold text-zinc-200 font-mono block mt-1">
-            ${status?.account_balance || '0.00'}
-          </strong>
-        </div>
-
-        <div className="bg-zinc-900/90 border border-zinc-800 p-3.5 rounded-2xl shadow-lg">
-          <span className="text-[10px] font-mono text-zinc-500 uppercase block">Session PNL</span>
-          <strong className={`text-base font-black font-mono block mt-1 ${pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-            {pnl >= 0 ? `+$${pnl.toFixed(2)}` : `-$${Math.abs(pnl).toFixed(2)}`}
-          </strong>
-        </div>
-      </div>
-
-      {/* SANDBOX / BACKTEST CUSTOMIZÁVEL */}
-      <div className="bg-gradient-to-br from-zinc-900 to-zinc-950 border border-zinc-800/80 p-4 rounded-2xl space-y-3 shadow-xl">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <Sparkles size={15} className="text-amber-400" />
-            <h4 className="text-xs font-bold text-zinc-200 uppercase font-mono">Sandbox Backtest</h4>
-          </div>
-          {latestBacktest && (
-            <button
-              onClick={() => setShowReportModal(true)}
-              className="text-[10px] font-mono font-bold text-violet-400 hover:text-violet-300 underline flex items-center gap-1">
-              View Latest Report <ArrowRight size={10} />
-            </button>
-          )}
-        </div>
-
-        {/* 1. SELETOR DE ATIVO */}
-        <div>
-          <span className="text-[10px] font-mono text-zinc-400 block mb-1.5 uppercase">Target Asset</span>
-          <div className="grid grid-cols-2 gap-2">
-            <button
-              onClick={() => setSelectedAsset('US100')}
-              className={`py-1.5 rounded-xl text-xs font-mono font-bold border transition-all ${
-                selectedAsset === 'US100'
-                  ? 'bg-violet-500/10 border-violet-500/40 text-violet-300'
-                  : 'bg-zinc-950 border-zinc-800/80 text-zinc-500 hover:text-zinc-300'
-              }`}>
-              NASDAQ (US100)
-            </button>
-            <button
-              onClick={() => setSelectedAsset('XAUUSD')}
-              className={`py-1.5 rounded-xl text-xs font-mono font-bold border transition-all ${
-                selectedAsset === 'XAUUSD'
-                  ? 'bg-amber-500/10 border-amber-500/40 text-amber-300'
-                  : 'bg-zinc-950 border-zinc-800/80 text-zinc-500 hover:text-zinc-300'
-              }`}>
-              GOLD (XAUUSD)
-            </button>
-          </div>
-        </div>
-
-        {/* 2. SELETOR DE DIAS */}
-        <div>
-          <span className="text-[10px] font-mono text-zinc-400 block mb-1.5 uppercase">Lookback Window</span>
-          <div className="grid grid-cols-4 gap-1.5">
-            {[1, 2, 3, 5].map((d) => (
-              <button
-                key={d}
-                onClick={() => setSelectedDays(d)}
-                className={`py-1 rounded-lg text-xs font-mono font-bold border transition-all ${
-                  selectedDays === d
-                    ? 'bg-emerald-500/10 border-emerald-500/40 text-emerald-300'
-                    : 'bg-zinc-950 border-zinc-800/80 text-zinc-500 hover:text-zinc-300'
-                }`}>
-                {d}D
-              </button>
-            ))}
-          </div>
-        </div>
-
-        {/* BOTÃO DISPARADOR */}
-        <button
-          onClick={handleBacktestClick}
-          disabled={isRunningBacktest}
-          className="w-full py-2.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-xs font-mono font-bold text-amber-300 border border-zinc-700 transition-all flex items-center justify-center gap-2 shadow-lg">
-          <BarChart3 size={14} />
-          {isRunningBacktest ? `Analyzing ${selectedAsset} (${selectedDays}D)...` : `Run ${selectedAsset} Backtest (${selectedDays}D)`}
-        </button>
-      </div>
-
-      {/* BOTÃO TRAVA DE EMERGÊNCIA */}
-      <button
-        onClick={() => setShowEmergencyModal(true)}
-        className="w-full py-3 bg-rose-950/40 hover:bg-rose-900/60 border border-rose-800/60 text-rose-300 rounded-xl text-xs font-bold font-mono uppercase tracking-wider flex items-center justify-center gap-2 transition-all">
-        <Power size={14} /> Emergency Stop (Flatten & Cancel)
-      </button>
-
-      {/* MODAL 1: RELATÓRIO DO BACKTEST (ELEGANTE E DETALHADO) */}
-      {showReportModal && latestBacktest && (
-        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-zinc-900 border border-zinc-800 w-full max-w-sm rounded-2xl p-5 shadow-2xl relative animate-in fade-in zoom-in-95 duration-150 space-y-4">
-            <button
-              onClick={() => setShowReportModal(false)}
-              className="absolute top-4 right-4 text-zinc-500 hover:text-zinc-200">
-              <X size={18} />
-            </button>
-
-            {/* Cabeçalho */}
-            <div className="flex items-center gap-3">
-              <div className="p-2.5 bg-amber-500/10 border border-amber-500/20 text-amber-400 rounded-xl">
-                <Trophy size={22} />
-              </div>
-              <div>
-                <h3 className="text-sm font-bold text-zinc-100 font-mono uppercase">
-                  {latestBacktest.symbol} Backtest
-                </h3>
-                <span className="text-[10px] text-zinc-400 font-mono">
-                  {latestBacktest.days} Days Window • {latestBacktest.setups} Setups Formed
-                </span>
-              </div>
-            </div>
-
-            {/* Placar dos 3 Perfis */}
-            <div className="space-y-2">
-              {/* SNIPER */}
-              <div className={`p-2.5 rounded-xl border flex items-center justify-between ${
-                latestBacktest.recommended === 'SNIPER'
-                  ? 'bg-amber-500/10 border-amber-500/40'
-                  : 'bg-zinc-950 border-zinc-800/70'
-              }`}>
-                <div>
-                  <strong className="text-xs font-bold font-mono text-zinc-200 block">SNIPER (1:4 R:R)</strong>
-                  <span className="text-[9px] text-zinc-500 font-mono">Tight SL • Long expansion target</span>
-                </div>
-                <div className="text-right">
-                  <span className="text-sm font-black font-mono text-amber-300">{latestBacktest.sniper_rate}%</span>
-                  <span className="text-[9px] text-zinc-500 block font-mono">Win Rate</span>
-                </div>
-              </div>
-
-              {/* TACTICAL */}
-              <div className={`p-2.5 rounded-xl border flex items-center justify-between ${
-                latestBacktest.recommended === 'TACTICAL'
-                  ? 'bg-blue-500/10 border-blue-500/40'
-                  : 'bg-zinc-950 border-zinc-800/70'
-              }`}>
-                <div>
-                  <strong className="text-xs font-bold font-mono text-zinc-200 block">TACTICAL (1:2.5 R:R)</strong>
-                  <span className="text-[9px] text-zinc-500 font-mono">Balanced SL • Medium target</span>
-                </div>
-                <div className="text-right">
-                  <span className="text-sm font-black font-mono text-blue-300">{latestBacktest.tatico_rate}%</span>
-                  <span className="text-[9px] text-zinc-500 block font-mono">Win Rate</span>
-                </div>
-              </div>
-
-              {/* GUARDIAN */}
-              <div className={`p-2.5 rounded-xl border flex items-center justify-between ${
-                latestBacktest.recommended === 'GUARDIAN'
-                  ? 'bg-emerald-500/10 border-emerald-500/40'
-                  : 'bg-zinc-950 border-zinc-800/70'
-              }`}>
-                <div>
-                  <strong className="text-xs font-bold font-mono text-zinc-200 block">GUARDIAN (1:1.5 R:R)</strong>
-                  <span className="text-[9px] text-zinc-500 font-mono">Wide ATR SL • High hit rate</span>
-                </div>
-                <div className="text-right">
-                  <span className="text-sm font-black font-mono text-emerald-300">{latestBacktest.guardiao_rate}%</span>
-                  <span className="text-[9px] text-zinc-500 block font-mono">Win Rate</span>
-                </div>
-              </div>
-            </div>
-
-            {/* Sugestão de Perfil */}
-            <div className="bg-zinc-950 p-3 rounded-xl border border-zinc-800/80 flex items-center justify-between">
-              <div>
-                <span className="text-[10px] text-zinc-500 font-mono uppercase block">Recommended Profile</span>
-                <strong className="text-xs font-bold text-emerald-400 font-mono">{latestBacktest.recommended}</strong>
-              </div>
-              <button
-                onClick={() => applyRecommendedProfile(latestBacktest.recommended)}
-                className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-bold font-mono transition-all flex items-center gap-1 shadow-md">
-                <CheckCircle2 size={13} /> Apply Profile
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* MODAL 2: EMERGÊNCIA */}
-      {showEmergencyModal && (
-        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-zinc-900 border border-zinc-800 w-full max-w-sm rounded-2xl p-5 shadow-2xl relative animate-in fade-in zoom-in-95 duration-150">
-            <button
-              onClick={() => setShowEmergencyModal(false)}
-              className="absolute top-4 right-4 text-zinc-500 hover:text-zinc-200">
-              <X size={18} />
-            </button>
-
-            <div className="flex items-center gap-3 mb-3">
-              <div className="p-2.5 bg-rose-500/10 border border-rose-500/20 text-rose-400 rounded-xl">
-                <AlertTriangle size={22} />
-              </div>
-              <div>
-                <h3 className="text-sm font-bold text-zinc-100 font-mono">Emergency Stop</h3>
-                <span className="text-[10px] text-zinc-400 font-mono">Immediate execution</span>
-              </div>
-            </div>
-
-            <p className="text-xs text-zinc-300 mb-5 leading-relaxed bg-zinc-950/60 p-3 rounded-xl border border-zinc-800/60">
-              This will immediately cancel all pending orders and close all open positions on MetaTrader 5.
-            </p>
-
-            <div className="grid grid-cols-2 gap-2">
-              <button
-                onClick={() => setShowEmergencyModal(false)}
-                className="py-2.5 rounded-xl border border-zinc-800 bg-zinc-800/60 hover:bg-zinc-800 text-xs font-bold text-zinc-300">
-                Cancel
-              </button>
-              <button
-                onClick={() => {
-                  setShowEmergencyModal(false);
-                  onEmergencyStop();
-                }}
-                className="py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-xs font-bold text-white shadow-lg shadow-rose-900/50">
-                Confirm
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
 </file>
 
 </files>

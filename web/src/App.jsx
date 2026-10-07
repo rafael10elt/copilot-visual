@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import { createClient } from '@supabase/supabase-js';
 import { Zap, LayoutDashboard, Sliders, ScrollText, Volume2, VolumeX } from 'lucide-react';
 import Dashboard from './components/Dashboard';
@@ -20,54 +20,46 @@ export default function App() {
   const [latestBacktest, setLatestBacktest] = useState(null);
   const [showReportModal, setShowReportModal] = useState(false);
   const [isBacktestLoading, setIsBacktestLoading] = useState(false);
-  const pollTimerRef = useRef(null);
 
   useEffect(() => {
+    // Carrega status inicial
     supabase.from('copilot_status').select('*').eq('id', 1).single()
-      .then(r => r.data && setStatus(r.data));
+      .then(r => {
+        if (r.data) {
+          setStatus(r.data);
+          if (r.data.last_backtest) {
+            setLatestBacktest(r.data.last_backtest);
+          }
+        }
+      });
 
     supabase.from('copilot_settings').select('*').eq('id', 1).single()
       .then(r => r.data && setSettings(r.data));
 
     supabase.from('copilot_logs').select('*').order('created_at', { ascending: false }).limit(40)
-      .then(r => {
-        if (r.data) {
-          setLogs(r.data);
-          const reportLog = r.data.find(l => l.message && l.message.startsWith('BACKTEST_RESULT:'));
-          if (reportLog) {
-            try {
-              const parsed = JSON.parse(reportLog.message.replace('BACKTEST_RESULT:', ''));
-              setLatestBacktest(parsed);
-            } catch {}
-          }
-        }
-      });
+      .then(r => r.data && setLogs(r.data));
 
+    // Assina Realtime
     const channel = supabase.channel('copilot_realtime_sync')
-      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'copilot_status' }, p => setStatus(p.new))
-      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'copilot_settings' }, p => setSettings(p.new))
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'copilot_status' }, p => {
+        setStatus(p.new);
+        // Quando o robô salva o resultado do backtest no status, abre o modal na hora!
+        if (p.new.last_backtest) {
+          setLatestBacktest(p.new.last_backtest);
+          setIsBacktestLoading(false);
+          setShowReportModal(true);
+        }
+      })
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'copilot_settings' }, p => {
+        setSettings(p.new);
+      })
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'copilot_logs' }, p => {
         setLogs(prev => [p.new, ...prev.slice(0, 45)]);
-
-        // Se chegar o resultado do Backtest via Realtime
-        if (p.new.message && p.new.message.startsWith('BACKTEST_RESULT:')) {
-          try {
-            const parsed = JSON.parse(p.new.message.replace('BACKTEST_RESULT:', ''));
-            setLatestBacktest(parsed);
-            setIsBacktestLoading(false);
-            setShowReportModal(true);
-            if (pollTimerRef.current) clearInterval(pollTimerRef.current);
-          } catch {}
-        }
-
         if (soundEnabled && p.new.level === 'SUCCESS') playAlertSound();
       })
       .subscribe();
 
-    return () => {
-      supabase.removeChannel(channel);
-      if (pollTimerRef.current) clearInterval(pollTimerRef.current);
-    };
+    return () => supabase.removeChannel(channel);
   }, [soundEnabled]);
 
   const handleUpdateSettings = async (newFields) => {
@@ -76,56 +68,20 @@ export default function App() {
   };
 
   const handleEmergencyStop = async () => {
-    await supabase.from('copilot_logs').insert({
-      message: "EMERGENCY_STOP_TRIGGERED: Cancelling orders and flattening positions",
-      level: "DANGER"
-    });
+    await supabase.from('copilot_settings').update({ command: "EMERGENCY_STOP" }).eq('id', 1);
   };
 
- const handleRunBacktest = async (days = 2, asset = 'US100') => {
+  const handleRunBacktest = async (days = 2, asset = 'US100') => {
     const symbolTarget = asset === 'US100' ? 'US100.cash' : 'XAUUSD';
-    
+
     // Abre o modal de imediato em modo de carregamento
     setIsBacktestLoading(true);
     setShowReportModal(true);
 
-    // Envia o comando para o notebook
-    await supabase.from('copilot_logs').insert({
-      symbol: symbolTarget,
-      message: `COMMAND: RUN_BACKTEST:${symbolTarget}:${days}`,
-      level: "INFO"
-    });
-
-    // Polling inteligente a cada 1 segundo (com limite de 20 segundos)
-    let attempts = 0;
-    if (pollTimerRef.current) clearInterval(pollTimerRef.current);
-
-    pollTimerRef.current = setInterval(async () => {
-      attempts++;
-      
-      const { data } = await supabase.from('copilot_logs')
-        .select('*')
-        .like('message', 'BACKTEST_RESULT:%')
-        .order('created_at', { ascending: false })
-        .limit(1);
-
-      if (data && data.length > 0) {
-        try {
-          const parsed = JSON.parse(data[0].message.replace('BACKTEST_RESULT:', ''));
-          setLatestBacktest(parsed);
-          setIsBacktestLoading(false);
-          clearInterval(pollTimerRef.current);
-          return;
-        } catch (err) {
-          console.error("Erro ao parsear backtest:", err);
-        }
-      }
-
-      if (attempts >= 20) {
-        setIsBacktestLoading(false);
-        clearInterval(pollTimerRef.current);
-      }
-    }, 1000);
+    // Envia o comando direto pelo copilot_settings (100% infalível)
+    await supabase.from('copilot_settings').update({
+      command: `RUN_BACKTEST:${symbolTarget}:${days}`
+    }).eq('id', 1);
   };
 
   const handleClearLogs = async () => {
