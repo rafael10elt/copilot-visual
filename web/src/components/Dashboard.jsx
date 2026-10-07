@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { 
   UserCheck, Power, Sparkles, BarChart3, AlertTriangle, X, 
   CheckCircle2, Trophy, ArrowRight, Loader2, Activity, Clock, 
-  Radar, Cpu, Sliders, ShieldCheck, Zap, Crosshair, TableProperties, ShieldAlert
+  Radar, Cpu, Sliders, ShieldCheck, Zap, Crosshair, TableProperties
 } from 'lucide-react';
 
 export default function Dashboard({ 
@@ -21,7 +21,7 @@ export default function Dashboard({
 
   const [showEmergencyModal, setShowEmergencyModal] = useState(false);
   const [selectedAsset, setSelectedAsset] = useState('US100');
-  const [selectedDays, setSelectedDays] = useState(5);
+  const [selectedDays, setSelectedDays] = useState(0); // 0 = Sessão Atual (Hoje)
   const [backtestViewTab, setBacktestViewTab] = useState('raio_x');
 
   const currentRiskBase = Number(settings?.risk_per_trade || 50);
@@ -56,6 +56,11 @@ export default function Dashboard({
       breakeven_enabled: item.with_be
     });
     setShowReportModal(false);
+  };
+
+  const formatDaysLabel = (d) => {
+    if (d === 0 || d === "0") return "Sessão Atual (Hoje)";
+    return `${d}D`;
   };
 
   return (
@@ -335,17 +340,23 @@ export default function Dashboard({
 
         <div>
           <span className="text-[10px] font-mono text-zinc-400 block mb-1.5 uppercase">Janela de Teste</span>
-          <div className="grid grid-cols-4 gap-1.5">
-            {[1, 2, 3, 5].map((d) => (
+          <div className="grid grid-cols-5 gap-1.5">
+            {[
+              { label: 'Hoje', val: 0 },
+              { label: '1D', val: 1 },
+              { label: '2D', val: 2 },
+              { label: '3D', val: 3 },
+              { label: '5D', val: 5 }
+            ].map(({ label, val }) => (
               <button
-                key={d}
-                onClick={() => setSelectedDays(d)}
+                key={val}
+                onClick={() => setSelectedDays(val)}
                 className={`py-1 rounded-lg text-xs font-mono font-bold border transition-all ${
-                  selectedDays === d
-                    ? 'bg-emerald-500/10 border-emerald-500/40 text-emerald-300'
+                  selectedDays === val
+                    ? 'bg-emerald-500/10 border-emerald-500/40 text-emerald-300 shadow-sm'
                     : 'bg-zinc-950 border-zinc-800/80 text-zinc-500 hover:text-zinc-300'
                 }`}>
-                {d}D
+                {label}
               </button>
             ))}
           </div>
@@ -358,12 +369,12 @@ export default function Dashboard({
           {isBacktestLoading ? (
             <>
               <Loader2 size={14} className="animate-spin text-amber-400" />
-              <span>Calculando Execução Real Sequencial ({selectedAsset})...</span>
+              <span>Calculando Execução Real ({selectedAsset} • {formatDaysLabel(selectedDays)})...</span>
             </>
           ) : (
             <>
               <BarChart3 size={14} />
-              <span>Executar Backtest Realista ({selectedAsset} - {selectedDays}D)</span>
+              <span>Executar Backtest Realista ({selectedAsset} • {formatDaysLabel(selectedDays)})</span>
             </>
           )}
         </button>
@@ -404,7 +415,7 @@ export default function Dashboard({
                   </div>
                   <div>
                     <h3 className="text-sm font-bold text-zinc-100 font-mono uppercase">
-                      {latestBacktest.symbol} Expectativa Realista ({latestBacktest.days}D)
+                      {latestBacktest.symbol} Expectativa Realista ({formatDaysLabel(latestBacktest.days)})
                     </h3>
                     <div className="flex items-center gap-2 text-[10px] text-zinc-400 font-mono mt-0.5">
                       <span>Mapeados: <strong className="text-zinc-300">{latestBacktest.setups_mapped}</strong></span>
@@ -420,7 +431,7 @@ export default function Dashboard({
                 <div className="bg-emerald-950/20 border border-emerald-500/30 p-2.5 rounded-xl flex items-center justify-between text-[10px] font-mono text-emerald-300">
                   <div className="flex items-center gap-2">
                     <ShieldCheck size={16} className="text-emerald-400" />
-                    <span>Fricções Deduzidas: 1 Trade Sequencial • Spread • Slippage • Taxas FTMO</span>
+                    <span>Fricções Deduzidas: 1 Trade Sequencial • Cooldown 5m • Spread • Slippage • Taxas FTMO</span>
                   </div>
                   <span className="text-[9px] bg-emerald-500/20 px-1.5 py-0.5 rounded font-bold">100% Real</span>
                 </div>

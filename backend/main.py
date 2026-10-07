@@ -1,4 +1,4 @@
-# main.py — Orquestrador HFT com Backtest de Expectativa Realista (Execução Sequencial + Fricção)
+# main.py — Orquestrador HFT com Backtest da Sessão Atual (Hoje) e Cooldown Realista
 import time
 import json
 from datetime import datetime, timedelta
@@ -226,16 +226,28 @@ def get_today_performance(risk_base=50.0):
             "realized_pnl": 0.0, "net_r": 0.0, "open_count": 0, "open_positions": [], "closed_trades": []
         }
 
-def run_recent_backtest(engine, symbol, days=5, risk_per_trade=50.0):
+def run_recent_backtest(engine, symbol, days=0, risk_per_trade=50.0):
     """
-    MOTOR DE EXPECTATIVA REALISTA (REAL-WORLD SEQUENTIAL BACKTEST):
-    1. Execução Sequencial Estrita: 1 trade por vez (sem posições sobrepostas).
-    2. Fricção de Spread Real + Slippage (deslizamento de execução).
-    3. Dedução de Comissões de Mesa Proprietária.
+    BACKTEST DE EXPECTATIVA REALISTA (COM SUPORTE À SESSÃO ATUAL - HOJE):
+    - Se days == 0: Avalia estritamente desde 00:00 do broker de hoje até o candle ao vivo.
+    - Aplica Cooldown Pós-Trade (5 min) para evitar micro-entradas repetidas.
+    - Aplica Fricção de Spread + Slippage + Taxas FTMO.
     """
     if not symbol: return None
-    total_m5 = int(days) * 240
-    total_m1 = int(days) * 1440
+
+    tick_ref = mt5.symbol_info_tick(symbol)
+    broker_now = datetime.fromtimestamp(tick_ref.time) if tick_ref else datetime.now()
+
+    # Cálculo da janela de candles
+    if days == 0:
+        start_of_day = datetime(broker_now.year, broker_now.month, broker_now.day, 0, 0, 0)
+        minutes_elapsed = max(60, int((broker_now - start_of_day).total_seconds() / 60))
+        total_m5 = max(24, int(minutes_elapsed / 5) + 20)
+        total_m1 = max(120, minutes_elapsed + 60)
+    else:
+        start_of_day = datetime.min
+        total_m5 = int(days) * 240
+        total_m1 = int(days) * 1440
 
     df_m5 = engine.get_candles(symbol, mt5.TIMEFRAME_M5, total_m5)
     df_m1 = engine.get_candles(symbol, mt5.TIMEFRAME_M1, total_m1)
@@ -246,12 +258,11 @@ def run_recent_backtest(engine, symbol, days=5, risk_per_trade=50.0):
     min_stop_points = 5.0 if is_nasdaq else 1.2
     max_risk = 30.0 if is_nasdaq else 4.5
 
-    # Parâmetros de Fricção Real da Corretora / Mesa
     info = mt5.symbol_info(symbol)
     point = info.point if info else 0.01
     spread_pts = (info.spread * point) if (info and info.spread > 0) else (1.5 if is_nasdaq else 0.25)
     slippage_pts = 0.8 if is_nasdaq else 0.15
-    commission_r = 0.04  # ~4% do risco gasto em taxa de corretagem round-turn
+    commission_r = 0.04  # 4% do risco gasto em taxa por trade
 
     detector = FVGDetector()
     vision = VisionLiquidityAnalyzer()
@@ -276,10 +287,13 @@ def run_recent_backtest(engine, symbol, days=5, risk_per_trade=50.0):
                     setups_mapped = 0
                     trades_executed = 0
 
-                    # Trava Sequencial de Posição Única: índice em M1 até onde o bot está ocupado
                     bot_busy_until_m1_idx = -1
 
                     for f in all_fvgs:
+                        # Se for teste da sessão atual, ignora dias anteriores
+                        if days == 0 and f['raw_time'] < start_of_day:
+                            continue
+
                         if req_sweep and not f['has_sweep']:
                             continue
 
@@ -289,11 +303,9 @@ def run_recent_backtest(engine, symbol, days=5, risk_per_trade=50.0):
                         raw_dist = abs(raw_entry - (f['bottom'] if direction == "BUY" else f['top']))
                         risk = min(max(raw_dist + (1.2 if is_nasdaq else 0.4), min_stop_points), max_risk)
 
-                        # Preços base
                         tp = raw_entry + (risk * mult) if direction == "BUY" else raw_entry - (risk * mult)
                         sl = raw_entry - risk if direction == "BUY" else raw_entry + risk
 
-                        # Validação de visão computacional pontual
                         f_idx = f['index']
                         df_context = df_m5.iloc[:f_idx+1]
                         path_ok, _ = vision.validate_liquidity_path(df_context, direction, raw_entry, tp)
@@ -302,7 +314,6 @@ def run_recent_backtest(engine, symbol, days=5, risk_per_trade=50.0):
 
                         setups_mapped += 1
 
-                        # Acha o candle M1 imediatamente posterior à confirmação do setup
                         start_idx = 0
                         for idx in range(len(m1_times)):
                             if m1_times[idx] >= f['raw_time']:
@@ -312,11 +323,10 @@ def run_recent_backtest(engine, symbol, days=5, risk_per_trade=50.0):
                         if start_idx == 0 or start_idx >= len(m1_times): 
                             continue
 
-                        # TRAVA SEQUENCIAL: se o robô já estava operando um trade nesse minuto, PULA!
+                        # TRAVA SEQUENCIAL COM COOLDOWN
                         if start_idx <= bot_busy_until_m1_idx:
                             continue
 
-                        # Janela de simulação: máximo 120 candles M1 (2 horas)
                         max_sim_idx = min(start_idx + 120, len(m1_highs))
                         sim_slice_h = m1_highs[start_idx : max_sim_idx]
                         sim_slice_l = m1_lows[start_idx : max_sim_idx]
@@ -325,15 +335,14 @@ def run_recent_backtest(engine, symbol, days=5, risk_per_trade=50.0):
                         win, loss, hit_be = False, False, False
                         trade_resolved_idx = start_idx
 
-                        # FRICÇÃO DE SPREAD E SLIPPAGE NA ENTRADA E ALVOS
                         if direction == "BUY":
                             effective_entry = raw_entry + spread_pts + slippage_pts
-                            effective_tp = tp  # sai no Bid
-                            effective_sl = sl  # sai no Bid
+                            effective_tp = tp
+                            effective_sl = sl
                         else:
                             effective_entry = raw_entry - slippage_pts
-                            effective_tp = tp + spread_pts  # sai no Ask
-                            effective_sl = sl + spread_pts  # sai no Ask
+                            effective_tp = tp + spread_pts
+                            effective_sl = sl + spread_pts
 
                         for step, (h, l) in enumerate(zip(sim_slice_h, sim_slice_l)):
                             current_m1_idx = start_idx + step
@@ -346,7 +355,6 @@ def run_recent_backtest(engine, symbol, days=5, risk_per_trade=50.0):
                                 if not triggered: 
                                     continue
 
-                            # Lógica Break-Even com spread
                             if with_be and not hit_be:
                                 if direction == "BUY" and h >= (effective_entry + risk * 1.2): 
                                     hit_be = True
@@ -380,8 +388,8 @@ def run_recent_backtest(engine, symbol, days=5, risk_per_trade=50.0):
 
                         if triggered:
                             trades_executed += 1
-                            # O robô fica ocupado até o minuto que o trade resolveu
-                            bot_busy_until_m1_idx = trade_resolved_idx
+                            # COOLDOWN REALISTA: fica ocupado até o trade fechar + 5 minutos de M1
+                            bot_busy_until_m1_idx = trade_resolved_idx + 5
 
                             if win: wins += 1
                             elif loss: losses += 1
@@ -390,8 +398,6 @@ def run_recent_backtest(engine, symbol, days=5, risk_per_trade=50.0):
                     total_resolved = wins + losses
                     win_rate = int((wins / total_resolved) * 100) if total_resolved > 0 else 0
 
-                    # CÁLCULO FINANCEIRO REALISTA COM COMISSÕES
-                    # Win: ganha R líquido da taxa | Loss: perde 1R + taxa | BE: perde taxa de corretagem
                     net_r_raw = (wins * mult) - (losses * 1.0)
                     total_deals = wins + losses + be_count
                     total_commissions_r = total_deals * commission_r
@@ -439,7 +445,7 @@ def run_recent_backtest(engine, symbol, days=5, risk_per_trade=50.0):
         "strategy_info": {
             "mode": "Execução Sequencial (1 Trade por Vez)",
             "frictions": f"Spread ({spread_pts:.2f}) + Slippage + Comissões",
-            "context": f"Histórico Real {days}D"
+            "context": "Sessão Atual (Hoje)" if days == 0 else f"Histórico Real {days}D"
         },
         "raio_x": raio_x_results,
         "with_be": get_subset(use_ce=True, be=True),
@@ -473,7 +479,7 @@ def main():
     active_mode = "BOTH"
     cached_settings = {}
 
-    sync.add_log(None, "Motor conectado com Backtest de Expectativa Realista.", "INFO")
+    sync.add_log(None, "Motor conectado com Suporte à Sessão Atual (Hoje).", "INFO")
 
     try:
         while True:
@@ -520,7 +526,7 @@ def main():
                             parts = cmd.split(":")
                             cat = "NASDAQ" if "US100" in parts[1] else "GOLD"
                             real_sym = engine.resolve_symbol(cat)
-                            days = int(parts[2]) if len(parts) > 2 else 5
+                            days = int(parts[2]) if len(parts) > 2 else 0
 
                             rep = run_recent_backtest(engine, real_sym, days, risk_manager.risk_per_trade_usd)
                             if rep:
