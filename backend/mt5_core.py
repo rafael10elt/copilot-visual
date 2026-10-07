@@ -1,4 +1,4 @@
-# mt5_core.py — Conexão, Killzones Alinhadas a UTC, Filtro de Spread e Visão Computacional
+# mt5_core.py — Conexão, Killzones UTC, Filtro de Spread, Sweeps e Visão Computacional
 import MetaTrader5 as mt5
 import pandas as pd
 import numpy as np
@@ -39,15 +39,23 @@ class MT5Engine:
             print("[MT5] Conexão encerrada.")
 
     def _calibrate_broker_utc_offset(self):
-        """Calcula a diferença entre o relógio da corretora e o UTC real."""
+        """Calcula a diferença entre o servidor e UTC com proteção contra ticks antigos de fins de semana."""
         tick = mt5.symbol_info_tick("EURUSD") or mt5.symbol_info_tick("XAUUSD")
         if tick and tick.time > 0:
             now_utc = datetime.now(timezone.utc).timestamp()
-            diff_hours = round((tick.time - now_utc) / 3600.0)
-            self.broker_utc_offset_hours = diff_hours
-            print(f"🌐 [TIME SYNC] Offset do servidor da corretora detectado: UTC{'+' if diff_hours >= 0 else ''}{diff_hours}")
-        else:
-            print(f"⚠️ [TIME SYNC] Usando offset padrão da corretora: UTC+{self.broker_utc_offset_hours}")
+            diff_seconds = tick.time - now_utc
+
+            # Se a diferença for menor que 12 horas, o mercado está ativo recentemente
+            if abs(diff_seconds) < 43200:
+                diff_hours = round(diff_seconds / 3600.0)
+                if -5 <= diff_hours <= 5:
+                    self.broker_utc_offset_hours = diff_hours
+                    print(f"🌐 [TIME SYNC] Offset do servidor da corretora calibrado: UTC{'+' if diff_hours >= 0 else ''}{diff_hours}")
+                    return
+
+        # Fallback seguro para padrão europeu/EET (FTMO, IC Markets, etc)
+        self.broker_utc_offset_hours = 2
+        print(f"🌐 [TIME SYNC] Mercado fechado ou tick desatualizado. Usando fallback padrão: UTC+{self.broker_utc_offset_hours}")
 
     def resolve_symbol(self, category):
         if category in self.symbol_cache:
@@ -103,7 +111,6 @@ class MT5Engine:
         tick = mt5.symbol_info_tick(symbol)
         if tick and tick.time > 0:
             return datetime.fromtimestamp(tick.time)
-        # Fallback usando o offset calibrado
         return datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=self.broker_utc_offset_hours)
 
     def is_spread_acceptable(self, symbol):
@@ -116,7 +123,6 @@ class MT5Engine:
         spread_pts = info.spread * point
         is_nasdaq = any(x in symbol.upper() for x in ["US100", "NAS", "USTEC", "NQ"])
 
-        # Teto tolerado de spread (pontos de cotação)
         max_allowed = 3.5 if is_nasdaq else 0.45
         if spread_pts > max_allowed:
             return False, f"Spread excessivo ({spread_pts:.2f} pts > teto de {max_allowed} pts)"
@@ -127,28 +133,24 @@ class MT5Engine:
 class InstitutionalSessionFilter:
     @staticmethod
     def is_session_active(symbol, broker_candle_time, broker_utc_offset=2):
-        """
-        Converte o horário do candle do servidor para UTC real e valida
-        as Killzones oficiais de Londres e Nova York.
-        """
-        # Converter server time para UTC real
+        """Valida as Killzones oficiais de Londres e NY sincronizadas em UTC."""
         candle_utc = broker_candle_time - timedelta(hours=broker_utc_offset)
         utc_hour = candle_utc.hour
         utc_minute = candle_utc.minute
 
-        # Bloqueio estrito da virada/rollover (spreads extremos entre 21h e 23h UTC)
+        # Bloqueio estrito de rollover e virada (21h às 02h UTC)
         if utc_hour >= 21 or utc_hour < 2:
             return False
 
         is_nasdaq = any(x in symbol.upper() for x in ["US100", "NAS", "USTEC", "NQ"])
 
         if is_nasdaq:
-            # NY Cash Open: 13:30 às 17:00 UTC (maior respeito aos FVGs do índice)
+            # NY Cash Open e expansão: 13:30 às 17:00 UTC
             if (utc_hour == 13 and utc_minute >= 30) or (14 <= utc_hour < 17):
                 return True
             return False
         else:
-            # XAUUSD: Londres (07:00 às 10:30 UTC) e Nova York (12:30 às 16:30 UTC)
+            # XAUUSD: Londres (07:00 às 10:30 UTC) e NY (12:30 às 16:30 UTC)
             london = (7 <= utc_hour < 10) or (utc_hour == 10 and utc_minute <= 30)
             ny = (12 <= utc_hour < 16) or (utc_hour == 16 and utc_minute <= 30)
             return london or ny
@@ -178,11 +180,6 @@ class VisionLiquidityAnalyzer:
         self.res = resolution
 
     def validate_liquidity_path(self, df, direction, entry_price, tp_price):
-        """
-        Analisa a rota do preço até o Take Profit.
-        Se a região entre a entrada e o TP já foi amplamente congestionada,
-        a ordem é rejeitada para evitar reversões em falso breakout.
-        """
         if df is None or len(df) < 20:
             return True, "Candles insuficientes"
 

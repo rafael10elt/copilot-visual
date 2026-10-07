@@ -1,9 +1,10 @@
-# main.py — Orquestrador HFT Completo (Live Trading + Sandbox Backtest + Escudos de Mesa)
+# main.py — Orquestrador HFT com Métricas de 30 Dias, Sandbox de até 30D e Proteções de Mesa
 import time
 import json
 import requests
 from datetime import datetime, timezone, timedelta
 import MetaTrader5 as mt5
+import numpy as np
 
 from mt5_core import (
     MT5Engine, 
@@ -53,7 +54,6 @@ class EconomicNewsFilter:
                     ev_time = datetime.fromisoformat(ev_time_str)
                     diff_minutes = (ev_time - now_utc).total_seconds() / 60.0
 
-                    # Janela de proteção: 15 minutos antes até 10 minutos após o anúncio
                     if -10 <= diff_minutes <= window_minutes:
                         return True, ev.get("title", "Notícia de Alto Impacto USD")
                 except Exception:
@@ -201,36 +201,69 @@ def manage_open_trades(risk_manager, settings):
             if res.retcode == mt5.TRADE_RETCODE_DONE:
                 print(f"🛡️ [BREAK-EVEN] #{p.ticket} ({p.symbol}) SL ajustado para {new_sl}")
 
-def get_today_performance(risk_base=50.0):
+def get_performance_stats(risk_base=50.0):
+    """Calcula estatísticas de execução diária (Hoje) e agregadas dos últimos 30 Dias."""
     try:
         now = datetime.now()
-        start_of_day = datetime(now.year, now.month, now.day, 0, 0, 0)
-        end_of_day = start_of_day + timedelta(days=2)
+        start_of_today = datetime(now.year, now.month, now.day, 0, 0, 0)
+        end_of_today = start_of_today + timedelta(days=2)
+        start_30d = start_of_today - timedelta(days=30)
 
-        deals = mt5.history_deals_get(start_of_day, end_of_day)
-        closed_trades = []
-        wins, losses = 0, 0
-        realized_pnl = 0.0
+        deals_30d = mt5.history_deals_get(start_30d, end_of_today)
+        
+        today_deals_closed = []
+        today_wins, today_losses = 0, 0
+        today_realized_pnl = 0.0
 
-        if deals:
-            for d in deals:
+        pnl_30d = 0.0
+        wins_30d, losses_30d = 0, 0
+        gross_profit_30d, gross_loss_30d = 0.0, 0.0
+
+        running_pnl = 0.0
+        peak_pnl = 0.0
+        max_drawdown_usd = 0.0
+
+        if deals_30d:
+            # Ordena cronologicamente para calcular o rebaixamento máximo exato (Max Drawdown)
+            sorted_deals = sorted(deals_30d, key=lambda x: x.time)
+            
+            for d in sorted_deals:
                 if d.entry == mt5.DEAL_ENTRY_OUT and d.magic == ROBOT_MAGIC:
                     profit = round(d.profit + d.commission + d.swap, 2)
-                    realized_pnl += profit
-                    if profit > 0: wins += 1
-                    elif profit < 0: losses += 1
+                    
+                    # Agregação 30D
+                    pnl_30d += profit
+                    if profit > 0:
+                        wins_30d += 1
+                        gross_profit_30d += profit
+                    elif profit < 0:
+                        losses_30d += 1
+                        gross_loss_30d += abs(profit)
 
-                    trade_type = "SELL" if d.type == mt5.DEAL_TYPE_BUY else "BUY"
-                    trade_r = round(profit / max(risk_base, 1.0), 2)
-                    closed_trades.append({
-                        "ticket": d.ticket,
-                        "symbol": d.symbol,
-                        "type": trade_type,
-                        "volume": d.volume,
-                        "profit": profit,
-                        "r_multiple": trade_r,
-                        "time": datetime.fromtimestamp(d.time).strftime("%H:%M")
-                    })
+                    running_pnl += profit
+                    if running_pnl > peak_pnl:
+                        peak_pnl = running_pnl
+                    dd = peak_pnl - running_pnl
+                    if dd > max_drawdown_usd:
+                        max_drawdown_usd = dd
+
+                    # Agregação de Hoje
+                    if d.time >= start_of_today.timestamp():
+                        today_realized_pnl += profit
+                        if profit > 0: today_wins += 1
+                        elif profit < 0: today_losses += 1
+
+                        trade_type = "SELL" if d.type == mt5.DEAL_TYPE_BUY else "BUY"
+                        trade_r = round(profit / max(risk_base, 1.0), 2)
+                        today_deals_closed.append({
+                            "ticket": d.ticket,
+                            "symbol": d.symbol,
+                            "type": trade_type,
+                            "volume": d.volume,
+                            "profit": profit,
+                            "r_multiple": trade_r,
+                            "time": datetime.fromtimestamp(d.time).strftime("%H:%M")
+                        })
 
         open_positions = []
         positions = mt5.positions_get()
@@ -249,35 +282,52 @@ def get_today_performance(risk_base=50.0):
                         "profit": round(p.profit + p.swap, 2)
                     })
 
-        total = wins + losses
-        win_rate = int((wins / total) * 100) if total > 0 else 0
-        net_r_total = round(realized_pnl / max(risk_base, 1.0), 2)
+        today_total = today_wins + today_losses
+        today_win_rate = int((today_wins / today_total) * 100) if today_total > 0 else 0
+        today_net_r = round(today_realized_pnl / max(risk_base, 1.0), 2)
+
+        total_30d = wins_30d + losses_30d
+        win_rate_30d = int((wins_30d / total_30d) * 100) if total_30d > 0 else 0
+        net_r_30d = round(pnl_30d / max(risk_base, 1.0), 2)
+        profit_factor_30d = round(gross_profit_30d / gross_loss_30d, 2) if gross_loss_30d > 0 else (2.5 if gross_profit_30d > 0 else 0.0)
 
         return {
-            "total_trades": total,
-            "wins": wins,
-            "losses": losses,
-            "win_rate": win_rate,
-            "realized_pnl": round(realized_pnl, 2),
-            "net_r": net_r_total,
+            "total_trades": today_total,
+            "wins": today_wins,
+            "losses": today_losses,
+            "win_rate": today_win_rate,
+            "realized_pnl": round(today_realized_pnl, 2),
+            "net_r": today_net_r,
             "open_count": len(open_positions),
             "open_positions": open_positions,
-            "closed_trades": closed_trades[-8:]
+            "closed_trades": today_deals_closed[-8:],
+            "stats_30d": {
+                "total_trades": total_30d,
+                "wins": wins_30d,
+                "losses": losses_30d,
+                "win_rate": win_rate_30d,
+                "realized_pnl": round(pnl_30d, 2),
+                "net_r": net_r_30d,
+                "max_drawdown_usd": round(max_drawdown_usd, 2),
+                "profit_factor": profit_factor_30d
+            }
         }
-    except Exception:
+    except Exception as e:
+        print(f"⚠️ Erro ao calcular estatísticas: {e}")
         return {
             "total_trades": 0, "wins": 0, "losses": 0, "win_rate": 0,
-            "realized_pnl": 0.0, "net_r": 0.0, "open_count": 0, "open_positions": [], "closed_trades": []
+            "realized_pnl": 0.0, "net_r": 0.0, "open_count": 0, "open_positions": [], "closed_trades": [],
+            "stats_30d": {
+                "total_trades": 0, "wins": 0, "losses": 0, "win_rate": 0,
+                "realized_pnl": 0.0, "net_r": 0.0, "max_drawdown_usd": 0.0, "profit_factor": 0.0
+            }
         }
 
 
 def run_recent_backtest(engine, symbol, days=0, risk_per_trade=50.0):
     """
-    MOTOR DO SANDBOX BACKTEST REALISTA COM MATRIZ RAIO-X
-    1. Execução Sequencial Estrita (Zero sobreposição irreal).
-    2. Respeita Killzones com relógio UTC sincronizado.
-    3. Fricções de Mesa: Spread, Slippage, Comissões e Trava de Meta/Perda Diária.
-    4. Pessimismo Intrabar em caso de conflito simultâneo.
+    MOTOR DO SANDBOX BACKTEST REALISTA (SUPORTA ATÉ 30 DIAS)
+    Utiliza np.searchsorted para processamento ultrarrápido de até 45.000 velas M1.
     """
     if not symbol: return None
 
@@ -290,7 +340,7 @@ def run_recent_backtest(engine, symbol, days=0, risk_per_trade=50.0):
         total_m1 = max(120, minutes_elapsed + 60)
     else:
         start_of_day = datetime.min
-        total_m5 = int(days) * 240
+        total_m5 = int(days) * 288
         total_m1 = int(days) * 1440
 
     df_m5 = engine.get_candles(symbol, mt5.TIMEFRAME_M5, total_m5)
@@ -343,18 +393,15 @@ def run_recent_backtest(engine, symbol, days=0, risk_per_trade=50.0):
                         if days == 0 and f_time < start_of_day:
                             continue
 
-                        # Controle de Virada de Dia
                         if f_date_str != current_sim_day:
                             current_sim_day = f_date_str
                             daily_trade_count = 0
                             daily_net_r = 0.0
                             day_locked = False
 
-                        # Trava de Mesa: Meta (+3.5R) ou Stop Diário (-2.0R) atingidos
                         if day_locked or daily_trade_count >= 5:
                             continue
 
-                        # Validação de Horário Alinhada a UTC
                         if not InstitutionalSessionFilter.is_session_active(
                             symbol, f['raw_time'], engine.broker_utc_offset_hours
                         ):
@@ -380,17 +427,10 @@ def run_recent_backtest(engine, symbol, days=0, risk_per_trade=50.0):
 
                         setups_mapped += 1
 
-                        start_idx = 0
-                        for idx in range(len(m1_times)):
-                            if m1_times[idx] >= f['raw_time']:
-                                start_idx = idx + 1
-                                break
+                        # Busca binária O(log N) — 100x mais veloz que loop sequencial para 30 dias
+                        start_idx = int(np.searchsorted(m1_times, np.datetime64(f['raw_time']), side='right'))
 
-                        if start_idx == 0 or start_idx >= len(m1_times): 
-                            continue
-
-                        # Trava Sequencial (1 trade ativo por vez)
-                        if start_idx <= bot_busy_until_m1_idx:
+                        if start_idx >= len(m1_times) or start_idx <= bot_busy_until_m1_idx:
                             continue
 
                         max_sim_idx = min(start_idx + 120, len(m1_highs))
@@ -422,12 +462,10 @@ def run_recent_backtest(engine, symbol, days=0, risk_per_trade=50.0):
                                 if not triggered: 
                                     continue
 
-                            # Lógica Break-Even
                             if with_be and not hit_be:
                                 if direction == "BUY" and h >= (effective_entry + risk * 1.2): hit_be = True
                                 elif direction == "SELL" and l <= (effective_entry - risk * 1.2): hit_be = True
 
-                            # Pessimismo Intrabar
                             if direction == "BUY":
                                 hit_tp = (h >= effective_tp)
                                 hit_sl = (l <= effective_sl) if not hit_be else (l <= effective_entry)
@@ -564,7 +602,7 @@ def main():
     active_mode = "BOTH"
     cached_settings = {}
 
-    sync.add_log(None, "Motor conectado com Escudo de Notícias e Horário UTC Calibrado.", "INFO")
+    sync.add_log(None, "Motor conectado com Métricas 30D e Sandbox Extendido.", "INFO")
 
     try:
         while True:
@@ -593,7 +631,7 @@ def main():
                 if purged > 0:
                     sync.add_log(None, f"📰 [NEWS SHIELD] {purged} ordens pendentes canceladas por anúncio: {news_title}", "WARN")
 
-            # 3. Sincronização Periódica a cada 2s + Execução de Comandos Remotos
+            # 3. Sincronização Periódica a cada 2s + Comandos Remotos
             agora = time.time()
             if agora - last_hb >= 2.0:
                 last_hb = agora
@@ -612,7 +650,7 @@ def main():
                         try: sync.client.table("copilot_settings").update({"command": None}).eq("id", 1).execute()
                         except: pass
 
-                        # GATILHO DO SANDBOX BACKTEST VICIADO PELO DASHBOARD
+                        # GATILHO DO SANDBOX BACKTEST VICIADO PELO DASHBOARD (0, 1, 7, 15, 30 DIAS)
                         if "RUN_BACKTEST" in cmd:
                             parts = cmd.split(":")
                             cat = "NASDAQ" if "US100" in parts[1] else "GOLD"
@@ -630,21 +668,21 @@ def main():
                             p = close_all_open_positions()
                             sync.add_log(None, f"EMERGÊNCIA: {c} ordens canceladas, {p} posições zeradas", "DANGER")
 
-                today_stats = get_today_performance(risk_base=risk_manager.risk_per_trade_usd)
-                today_stats["scout_directives"] = scout.active_directives
-                today_stats["is_auto_ai"] = bool(cached_settings.get("auto_profile_ia", False))
-                today_stats["active_strategy"] = {
+                perf_data = get_performance_stats(risk_base=risk_manager.risk_per_trade_usd)
+                perf_data["scout_directives"] = scout.active_directives
+                perf_data["is_auto_ai"] = bool(cached_settings.get("auto_profile_ia", False))
+                perf_data["active_strategy"] = {
                     "entry_type": "50% Consequent Encroachment (CE)" if cached_settings.get("use_ce_50", True) else "Borda do FVG",
                     "breakeven": "ATIVO (1.2R)" if cached_settings.get("breakeven_enabled", False) else "DESLIGADO",
                     "trailing": "ATIVO" if cached_settings.get("trailing_enabled", False) else "DESLIGADO"
                 }
 
-                sync.send_heartbeat(current_profile, pnl_today, login, balance, equity, server, today_stats)
+                sync.send_heartbeat(current_profile, pnl_today, login, balance, equity, server, perf_data)
 
-            # 4. Gestão de Ordens Abertas
+            # 4. Gestão de Posições Abertas
             manage_open_trades(risk_manager, cached_settings)
 
-            # Se estiver na janela de notícias, não busca novas entradas
+            # Janela de notícias bloqueia armamento de novas ordens
             if is_news:
                 time.sleep(1)
                 continue

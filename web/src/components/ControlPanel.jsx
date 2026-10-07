@@ -1,5 +1,5 @@
 import React from 'react';
-import { Crosshair, ShieldCheck, Zap, Bot, Sliders, Layers, Target, Clock } from 'lucide-react';
+import { Crosshair, ShieldCheck, Zap, Bot, Sliders, Layers, Target, Clock, DollarSign } from 'lucide-react';
 
 export default function ControlPanel({ settings, onUpdateSettings }) {
   const currentProfile = settings?.profile || 'tatico';
@@ -33,11 +33,17 @@ export default function ControlPanel({ settings, onUpdateSettings }) {
         </div>
       </div>
 
-      {/* 2. LIMITES FINANCEIROS */}
+      {/* 2. LIMITES FINANCEIROS & METAS DE MESA (PROP FIRM SHIELD) */}
       <div className="bg-zinc-900/90 border border-zinc-800 rounded-2xl p-4 space-y-3">
-        <label className="text-[11px] font-mono uppercase tracking-wider text-zinc-400 block">
-          2. Risk Limits (Prop Firm Shield)
-        </label>
+        <div className="flex items-center justify-between">
+          <label className="text-[11px] font-mono uppercase tracking-wider text-zinc-400 block">
+            2. Risk & Prop Firm Targets
+          </label>
+          <span className="text-[9px] bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-1.5 py-0.5 rounded font-mono font-bold">
+            CHALLENGE RULES
+          </span>
+        </div>
+
         <div className="grid grid-cols-2 gap-3">
           <div>
             <span className="text-[10px] text-zinc-500 font-mono block mb-1">Risk / Trade ($)</span>
@@ -55,6 +61,34 @@ export default function ControlPanel({ settings, onUpdateSettings }) {
               defaultValue={settings?.max_daily_loss || 500}
               onBlur={(e) => onUpdateSettings({ max_daily_loss: Number(e.target.value) })}
               className="w-full bg-zinc-950 border border-zinc-800 rounded-xl p-2.5 text-xs font-mono font-bold text-rose-400 focus:outline-none focus:border-rose-500"
+            />
+          </div>
+        </div>
+
+        {/* METAS ESPECÍFICAS DA MESA PROPRIETÁRIA */}
+        <div className="grid grid-cols-2 gap-3 pt-1 border-t border-zinc-800/60">
+          <div>
+            <span className="text-[10px] text-emerald-400 font-mono font-bold block mb-1">
+              Meta de Lucro da Mesa ($)
+            </span>
+            <input
+              type="number"
+              defaultValue={settings?.prop_target_profit || 8000}
+              onBlur={(e) => onUpdateSettings({ prop_target_profit: Number(e.target.value) })}
+              placeholder="Ex: 8000"
+              className="w-full bg-zinc-950 border border-zinc-800 rounded-xl p-2.5 text-xs font-mono font-bold text-emerald-300 focus:outline-none focus:border-emerald-500"
+            />
+          </div>
+          <div>
+            <span className="text-[10px] text-zinc-400 font-mono block mb-1">
+              Saldo da Conta ($)
+            </span>
+            <input
+              type="number"
+              defaultValue={settings?.initial_account_size || 100000}
+              onBlur={(e) => onUpdateSettings({ initial_account_size: Number(e.target.value) })}
+              placeholder="Ex: 100000"
+              className="w-full bg-zinc-950 border border-zinc-800 rounded-xl p-2.5 text-xs font-mono font-bold text-zinc-200 focus:outline-none focus:border-violet-500"
             />
           </div>
         </div>

@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { 
   UserCheck, Power, Sparkles, BarChart3, AlertTriangle, X, 
   CheckCircle2, Trophy, ArrowRight, Loader2, Activity, Clock, 
-  Radar, Cpu, Sliders, ShieldCheck, Zap, Crosshair, TableProperties
+  Radar, Cpu, Sliders, ShieldCheck, Zap, Crosshair, TableProperties, Target, TrendingUp
 } from 'lucide-react';
 
 export default function Dashboard({ 
@@ -21,10 +21,12 @@ export default function Dashboard({
 
   const [showEmergencyModal, setShowEmergencyModal] = useState(false);
   const [selectedAsset, setSelectedAsset] = useState('US100');
-  const [selectedDays, setSelectedDays] = useState(0); // 0 = Sessão Atual (Hoje)
+  const [selectedDays, setSelectedDays] = useState(0); // 0 = Hoje
   const [backtestViewTab, setBacktestViewTab] = useState('raio_x');
 
   const currentRiskBase = Number(settings?.risk_per_trade || 50);
+  const propTarget = Number(settings?.prop_target_profit || 8000);
+
   const stats = status?.today_stats || {
     total_trades: 0,
     wins: 0,
@@ -34,8 +36,32 @@ export default function Dashboard({
     net_r: 0,
     open_count: 0,
     open_positions: [],
-    closed_trades: []
+    closed_trades: [],
+    stats_30d: {
+      total_trades: 0,
+      wins: 0,
+      losses: 0,
+      win_rate: 0,
+      realized_pnl: 0,
+      net_r: 0,
+      max_drawdown_usd: 0,
+      profit_factor: 0
+    }
   };
+
+  const stats30d = stats.stats_30d || {
+    total_trades: 0,
+    wins: 0,
+    losses: 0,
+    win_rate: 0,
+    realized_pnl: 0,
+    net_r: 0,
+    max_drawdown_usd: 0,
+    profit_factor: 0
+  };
+
+  // Cálculo da porcentagem de conclusão da meta da mesa
+  const progressPct = Math.min(100, Math.max(0, (stats30d.realized_pnl / Math.max(propTarget, 1)) * 100));
 
   const scoutDirectives = stats?.scout_directives || null;
   const isAutoAI = stats?.is_auto_ai ?? !!settings?.auto_profile_ia;
@@ -85,7 +111,71 @@ export default function Dashboard({
         </div>
       </div>
 
-      {/* 2. MODO OPERACIONAL E ESTRATÉGIA NO COMANDO */}
+      {/* 2. CARD META DA MESA & PERFORMANCE 30 DIAS */}
+      <div className="bg-gradient-to-br from-zinc-900 via-zinc-900/90 to-zinc-950 border border-zinc-800 p-4 rounded-2xl shadow-xl space-y-3">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Target size={16} className="text-emerald-400" />
+            <h4 className="text-xs font-bold text-zinc-200 uppercase font-mono">
+              Prop Firm Target (Últimos 30 Dias)
+            </h4>
+          </div>
+          <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-zinc-800 text-zinc-300 border border-zinc-700">
+            Meta: ${propTarget.toLocaleString('pt-BR')}
+          </span>
+        </div>
+
+        {/* Barra de Progresso da Meta */}
+        <div>
+          <div className="flex justify-between text-[10px] font-mono mb-1">
+            <span className="text-zinc-400">
+              Progresso do Desafio: <strong className={stats30d.realized_pnl >= 0 ? "text-emerald-400" : "text-rose-400"}>
+                ${stats30d.realized_pnl.toLocaleString('pt-BR')}
+              </strong>
+            </span>
+            <span className="text-zinc-300 font-bold">{progressPct.toFixed(1)}%</span>
+          </div>
+          <div className="w-full bg-zinc-950 h-2.5 rounded-full overflow-hidden border border-zinc-800">
+            <div 
+              className="bg-gradient-to-r from-emerald-500 to-teal-400 h-full rounded-full transition-all duration-500"
+              style={{ width: `${progressPct}%` }}
+            />
+          </div>
+        </div>
+
+        {/* Grade de Métricas 30D */}
+        <div className="grid grid-cols-4 gap-2 pt-1 text-center">
+          <div className="bg-zinc-950 p-2 rounded-xl border border-zinc-800/80">
+            <span className="text-[8px] font-mono text-zinc-500 block uppercase">Net R (30D)</span>
+            <strong className={`text-xs font-bold font-mono mt-0.5 block ${stats30d.net_r >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+              {stats30d.net_r >= 0 ? `+${stats30d.net_r}R` : `${stats30d.net_r}R`}
+            </strong>
+          </div>
+
+          <div className="bg-zinc-950 p-2 rounded-xl border border-zinc-800/80">
+            <span className="text-[8px] font-mono text-zinc-500 block uppercase">Win Rate (30D)</span>
+            <strong className="text-xs font-bold font-mono text-zinc-100 mt-0.5 block">
+              {stats30d.win_rate}%
+            </strong>
+          </div>
+
+          <div className="bg-zinc-950 p-2 rounded-xl border border-zinc-800/80">
+            <span className="text-[8px] font-mono text-zinc-500 block uppercase">Trades (30D)</span>
+            <strong className="text-xs font-bold font-mono text-zinc-300 mt-0.5 block">
+              {stats30d.total_trades} ({stats30d.wins}W/{stats30d.losses}L)
+            </strong>
+          </div>
+
+          <div className="bg-zinc-950 p-2 rounded-xl border border-zinc-800/80">
+            <span className="text-[8px] font-mono text-rose-400 block uppercase font-bold">Max DD (30D)</span>
+            <strong className="text-xs font-bold font-mono text-rose-400 mt-0.5 block">
+              -${stats30d.max_drawdown_usd.toFixed(2)}
+            </strong>
+          </div>
+        </div>
+      </div>
+
+      {/* 3. MODO OPERACIONAL E ESTRATÉGIA NO COMANDO */}
       <div className="bg-gradient-to-r from-zinc-900 via-zinc-900/90 to-zinc-950 border border-zinc-800 p-3.5 rounded-2xl shadow-lg space-y-2.5">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -117,7 +207,7 @@ export default function Dashboard({
         </div>
       </div>
 
-      {/* 3. RADAR DO STRATEGY SCOUT */}
+      {/* 4. RADAR DO STRATEGY SCOUT */}
       <div className="bg-zinc-900/90 border border-zinc-800 p-4 rounded-2xl shadow-xl space-y-2.5">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -125,7 +215,7 @@ export default function Dashboard({
             <h4 className="text-xs font-bold text-zinc-200 uppercase font-mono">Strategy Scout (Diretrizes)</h4>
           </div>
           <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-zinc-800 text-amber-300 border border-amber-500/20">
-            Auto-Calibrador
+            Auto-Calibrador (10D)
           </span>
         </div>
 
@@ -178,7 +268,7 @@ export default function Dashboard({
         )}
       </div>
 
-      {/* 4. PLACAR PNL & SALDO */}
+      {/* 5. PLACAR PNL & SALDO DO DIA */}
       <div className="grid grid-cols-2 gap-3">
         <div className="bg-zinc-900/90 border border-zinc-800 p-3.5 rounded-2xl shadow-lg">
           <span className="text-[10px] font-mono text-zinc-500 uppercase block">Account Balance</span>
@@ -188,14 +278,14 @@ export default function Dashboard({
         </div>
 
         <div className="bg-zinc-900/90 border border-zinc-800 p-3.5 rounded-2xl shadow-lg">
-          <span className="text-[10px] font-mono text-zinc-500 uppercase block">Session PNL (Equity - Bal)</span>
+          <span className="text-[10px] font-mono text-zinc-500 uppercase block">Session PNL (Hoje)</span>
           <strong className={`text-base font-black font-mono block mt-1 ${pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
             {pnl >= 0 ? `+$${pnl.toFixed(2)}` : `-$${Math.abs(pnl).toFixed(2)}`}
           </strong>
         </div>
       </div>
 
-      {/* 5. CONTADORES REAIS COM NET R */}
+      {/* 6. CONTADORES REAIS DO DIA (TODAY) */}
       <div className="bg-zinc-900/90 border border-zinc-800 p-4 rounded-2xl shadow-xl space-y-3">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -230,7 +320,7 @@ export default function Dashboard({
           </div>
 
           <div className="bg-zinc-950 p-2 rounded-xl border border-zinc-800/80">
-            <span className="text-[8px] font-mono text-amber-400 block uppercase font-bold">Net R (R:R)</span>
+            <span className="text-[8px] font-mono text-amber-400 block uppercase font-bold">Net R (Hoje)</span>
             <strong className={`text-xs font-black font-mono mt-0.5 block ${stats.net_r >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
               {stats.net_r >= 0 ? `+${stats.net_r}R` : `${stats.net_r}R`}
             </strong>
@@ -298,7 +388,7 @@ export default function Dashboard({
         )}
       </div>
 
-      {/* 6. SANDBOX BACKTEST */}
+      {/* 7. SANDBOX BACKTEST COM RANGE ESTENDIDO (ATÉ 30D) */}
       <div className="bg-gradient-to-br from-zinc-900 to-zinc-950 border border-zinc-800/80 p-4 rounded-2xl space-y-3 shadow-xl">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -339,14 +429,14 @@ export default function Dashboard({
         </div>
 
         <div>
-          <span className="text-[10px] font-mono text-zinc-400 block mb-1.5 uppercase">Janela de Teste</span>
+          <span className="text-[10px] font-mono text-zinc-400 block mb-1.5 uppercase">Janela de Teste Institucional</span>
           <div className="grid grid-cols-5 gap-1.5">
             {[
               { label: 'Hoje', val: 0 },
               { label: '1D', val: 1 },
-              { label: '2D', val: 2 },
-              { label: '3D', val: 3 },
-              { label: '5D', val: 5 }
+              { label: '7D', val: 7 },
+              { label: '15D', val: 15 },
+              { label: '30D', val: 30 }
             ].map(({ label, val }) => (
               <button
                 key={val}
@@ -380,14 +470,14 @@ export default function Dashboard({
         </button>
       </div>
 
-      {/* 7. TRAVA DE EMERGÊNCIA */}
+      {/* 8. TRAVA DE EMERGÊNCIA */}
       <button
         onClick={() => setShowEmergencyModal(true)}
         className="w-full py-3 bg-rose-950/40 hover:bg-rose-900/60 border border-rose-800/60 text-rose-300 rounded-xl text-xs font-bold font-mono uppercase tracking-wider flex items-center justify-center gap-2 transition-all">
         <Power size={14} /> Trava de Emergência (Zerar Tudo)
       </button>
 
-      {/* 8. MODAL DO RELATÓRIO REALISTA (COM FRICÇÃO DE MESA) */}
+      {/* 9. MODAL DO RELATÓRIO REALISTA (COM FRICÇÃO DE MESA) */}
       {showReportModal && (
         <div className="fixed inset-0 bg-black/85 backdrop-blur-sm z-50 flex items-center justify-center p-2 sm:p-4">
           <div className="bg-zinc-900 border border-zinc-800 w-full max-w-xl rounded-2xl p-4 sm:p-5 shadow-2xl relative space-y-4 max-h-[92vh] overflow-y-auto no-scrollbar">
@@ -403,7 +493,7 @@ export default function Dashboard({
                 <div>
                   <h3 className="text-sm font-bold text-zinc-100 font-mono">Processando Execução Realista</h3>
                   <p className="text-[11px] text-zinc-400 font-mono mt-1">
-                    Simulando 1 ordem sequencial por vez, spreads dinâmicos e comissões da mesa...
+                    Simulando ordens sequenciais, spreads dinâmicos, comissões e janelas de até 30 dias...
                   </p>
                 </div>
               </div>
@@ -427,16 +517,14 @@ export default function Dashboard({
                   </div>
                 </div>
 
-                {/* BANNER INSTITUCIONAL DE FRICÇÃO APLICADA */}
                 <div className="bg-emerald-950/20 border border-emerald-500/30 p-2.5 rounded-xl flex items-center justify-between text-[10px] font-mono text-emerald-300">
                   <div className="flex items-center gap-2">
                     <ShieldCheck size={16} className="text-emerald-400" />
-                    <span>Fricções Deduzidas: 1 Trade Sequencial • Cooldown 5m • Spread • Slippage • Taxas FTMO</span>
+                    <span>Fricções Deduzidas: 1 Trade Sequencial • Cooldown 10m • Spread • Slippage • Taxas FTMO</span>
                   </div>
                   <span className="text-[9px] bg-emerald-500/20 px-1.5 py-0.5 rounded font-bold">100% Real</span>
                 </div>
 
-                {/* TABS DO MODAL */}
                 <div className="grid grid-cols-2 gap-1 bg-zinc-950 p-1 rounded-xl border border-zinc-800 text-[11px] font-mono font-bold">
                   <button
                     onClick={() => setBacktestViewTab('raio_x')}
@@ -454,7 +542,6 @@ export default function Dashboard({
                   </button>
                 </div>
 
-                {/* TAB 1: MATRIZ DE RAIO-X REALISTA */}
                 {backtestViewTab === 'raio_x' && latestBacktest.raio_x && (
                   <div className="space-y-2">
                     <div className="flex items-center justify-between text-[10px] font-mono text-zinc-400 px-1">
@@ -517,7 +604,6 @@ export default function Dashboard({
                   </div>
                 )}
 
-                {/* TAB 2: VISÃO CLÁSSICA LADO A LADO */}
                 {backtestViewTab === 'compare' && (
                   <div className="space-y-2">
                     {[
@@ -560,7 +646,6 @@ export default function Dashboard({
                   </div>
                 )}
 
-                {/* DIRETIVA CAMPEÃ */}
                 <div className="bg-zinc-950 p-3 rounded-xl border border-zinc-800/80 flex items-center justify-between">
                   <div className="min-w-0 flex-1 pr-2">
                     <span className="text-[9px] text-zinc-500 font-mono uppercase block">Melhor Estrutura Realista</span>
@@ -582,7 +667,7 @@ export default function Dashboard({
         </div>
       )}
 
-      {/* 9. MODAL EMERGÊNCIA */}
+      {/* 10. MODAL EMERGÊNCIA */}
       {showEmergencyModal && (
         <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-zinc-900 border border-zinc-800 w-full max-w-sm rounded-2xl p-5 shadow-2xl relative animate-in fade-in zoom-in-95 duration-150">
