@@ -1,4 +1,4 @@
-# mt5_core.py — Motor de Conexão, Sessões, Detecção de FVG, Liquidity Sweeps e 50% CE
+# mt5_core.py — Motor de Conexão, Sessões, Sweeps e Scanner de Histórico Completo
 import MetaTrader5 as mt5
 import pandas as pd
 import numpy as np
@@ -92,16 +92,12 @@ class InstitutionalSessionFilter:
         is_nasdaq = "US100" in symbol.upper() or "NAS" in symbol.upper() or "USTEC" in symbol.upper()
 
         if is_nasdaq:
-            return 15 <= hour <= 21
+            return 14 <= hour <= 22  # Janela de NY ampliada
         else:
-            return 9 <= hour <= 21
+            return 8 <= hour <= 22   # Londres e NY ampliadas
 
 
 class LiquiditySweepDetector:
-    """
-    Verifica se o FVG se formou IMEDIATAMENTE após uma varredura de liquidez (Sweep).
-    Alta probabilidade: captura de fundo anterior antes da compra ou topo antes da venda.
-    """
     @staticmethod
     def check_sweep(df, fvg_idx, direction, lookback=8):
         if df is None or fvg_idx < lookback:
@@ -111,14 +107,12 @@ class LiquiditySweepDetector:
         displacement_candle = df.iloc[fvg_idx]
 
         if direction == "BUY":
-            # Procura se alguma vela recente varreu a mínima da janela e rejeitou com pavio
             prior_low = window['low'].min()
-            swept = displacement_candle['low'] <= prior_low and displacement_candle['close'] > displacement_candle['open']
+            swept = displacement_candle['low'] <= prior_low
             return swept, "SSL_SWEEP" if swept else "NO_SWEEP"
         else:
-            # Procura se varreu a máxima da janela e fechou caindo
             prior_high = window['high'].max()
-            swept = displacement_candle['high'] >= prior_high and displacement_candle['close'] < displacement_candle['open']
+            swept = displacement_candle['high'] >= prior_high
             return swept, "BSL_SWEEP" if swept else "NO_SWEEP"
 
 
@@ -128,7 +122,7 @@ class VisionLiquidityAnalyzer:
 
     def validate_liquidity_path(self, df, direction, entry_price, tp_price):
         if df is None or len(df) < 20:
-            return True, "Candles insuficientes para matriz de visão"
+            return True, "Candles insuficientes"
 
         grid = np.zeros(self.res, dtype=np.float32)
         min_p = float(df['low'].min())
@@ -156,21 +150,18 @@ class VisionLiquidityAnalyzer:
             kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
             grid = cv2.dilate(grid, kernel, iterations=1)
 
-        y_entry = int((1.0 - (entry_price - min_p) / p_range) * (self.res[1] - 1))
-        y_tp = int((1.0 - (tp_price - min_p) / p_range) * (self.res[1] - 1))
-
-        y_entry = max(0, min(self.res[1] - 1, y_entry))
-        y_tp = max(0, min(self.res[1] - 1, y_tp))
+        y_entry = max(0, min(self.res[1] - 1, int((1.0 - (entry_price - min_p) / p_range) * (self.res[1] - 1))))
+        y_tp = max(0, min(self.res[1] - 1, int((1.0 - (tp_price - min_p) / p_range) * (self.res[1] - 1))))
 
         y_start, y_end = min(y_entry, y_tp), max(y_entry, y_tp)
         path_zone = grid[y_start:y_end, :]
-
         density = np.sum(path_zone >= 1.0) / (path_zone.size + 1e-5)
 
-        if density > 0.45:
-            return False, f"Parede de absorção detectada por visão (Densidade: {density:.1%})"
+        # Tolerância ajustada para 55% para não estrangular setups válidos
+        if density > 0.55:
+            return False, f"Absorção densa ({density:.1%})"
 
-        return True, "Caminho livre até o alvo"
+        return True, "Livre"
 
 
 class MarketStructureDetector:
@@ -209,11 +200,15 @@ class MarketStructureDetector:
 
 
 class FVGDetector:
-    def __init__(self, min_gap_nasdaq=3.0, min_gap_xau=0.4):
+    def __init__(self, min_gap_nasdaq=2.5, min_gap_xau=0.30):
         self.min_gap_nasdaq = min_gap_nasdaq
         self.min_gap_xau = min_gap_xau
 
-    def find_unmitigated_fvgs(self, df, symbol):
+    def find_all_historical_fvgs(self, df, symbol):
+        """
+        Coleta TODOS os FVGs formados cronologicamente para BACKTEST.
+        Não descarta os que foram tocados depois, permitindo simulação 100% fiel.
+        """
         if df is None or len(df) < 5:
             return []
 
@@ -222,61 +217,70 @@ class FVGDetector:
         min_gap = self.min_gap_nasdaq if is_nasdaq else self.min_gap_xau
 
         for i in range(len(df) - 3):
-            candle1 = df.iloc[i]
-            candle2 = df.iloc[i+1]
-            candle3 = df.iloc[i+2]
-            
+            c1 = df.iloc[i]
+            c2 = df.iloc[i+1]
+            c3 = df.iloc[i+2]
+
             fvg_type = None
             fvg_top = 0.0
             fvg_bottom = 0.0
             gap_size = 0.0
 
-            if candle3['low'] > candle1['high']:
-                gap_size = candle3['low'] - candle1['high']
+            if c3['low'] > c1['high']:
+                gap_size = c3['low'] - c1['high']
                 if gap_size >= min_gap:
                     fvg_type = 'BULLISH'
-                    fvg_top = candle3['low']
-                    fvg_bottom = candle1['high']
+                    fvg_top = c3['low']
+                    fvg_bottom = c1['high']
 
-            elif candle3['high'] < candle1['low']:
-                gap_size = candle1['low'] - candle3['high']
+            elif c3['high'] < c1['low']:
+                gap_size = c1['low'] - c3['high']
                 if gap_size >= min_gap:
                     fvg_type = 'BEARISH'
-                    fvg_top = candle1['low']
-                    fvg_bottom = candle3['high']
+                    fvg_top = c1['low']
+                    fvg_bottom = c3['high']
 
             if fvg_type:
-                mitigated = False
-                subsequent_candles = df.iloc[i+3:]
-                
-                for _, sub in subsequent_candles.iterrows():
-                    if fvg_type == 'BULLISH' and sub['low'] <= fvg_top:
-                        mitigated = True
-                        break
-                    elif fvg_type == 'BEARISH' and sub['high'] >= fvg_bottom:
-                        mitigated = True
-                        break
-                
-                if not mitigated:
-                    # Consequent Encroachment (ponto central exato de 50%)
-                    ce_50 = round(float((fvg_top + fvg_bottom) / 2.0), 2)
+                ce_50 = round(float((fvg_top + fvg_bottom) / 2.0), 2)
+                has_sweep, sweep_type = LiquiditySweepDetector.check_sweep(
+                    df, fvg_idx=i+1, direction="BUY" if fvg_type == 'BULLISH' else "SELL"
+                )
 
-                    # Verifica varredura prévia no momento do deslocamento
-                    has_sweep, sweep_type = LiquiditySweepDetector.check_sweep(
-                        df, fvg_idx=i+1, direction="BUY" if fvg_type == 'BULLISH' else "SELL"
-                    )
-
-                    fvgs.append({
-                        'type': fvg_type,
-                        'top': round(float(fvg_top), 2),
-                        'bottom': round(float(fvg_bottom), 2),
-                        'ce_50': ce_50,
-                        'has_sweep': has_sweep,
-                        'sweep_type': sweep_type,
-                        'size': round(float(gap_size), 2),
-                        'time_formed': candle2['time'].strftime('%H:%M'),
-                        'raw_time': candle2['time'],
-                        'age_candles': len(df) - (i+2)
-                    })
+                fvgs.append({
+                    'index': i + 2, # Confirmado no fechamento de c3
+                    'type': fvg_type,
+                    'top': round(float(fvg_top), 2),
+                    'bottom': round(float(fvg_bottom), 2),
+                    'ce_50': ce_50,
+                    'has_sweep': has_sweep,
+                    'sweep_type': sweep_type,
+                    'size': round(float(gap_size), 2),
+                    'time_formed': c3['time'].strftime('%H:%M'),
+                    'raw_time': c3['time']
+                })
 
         return fvgs
+
+    def find_unmitigated_fvgs(self, df, symbol):
+        """Coleta apenas os FVGs vivos em aberto para o Live Trading."""
+        all_fvgs = self.find_all_historical_fvgs(df, symbol)
+        unmitigated = []
+
+        for f in all_fvgs:
+            idx = f['index']
+            subsequent = df.iloc[idx+1:]
+            mitigated = False
+
+            for _, sub in subsequent.iterrows():
+                if f['type'] == 'BULLISH' and sub['low'] <= f['top']:
+                    mitigated = True
+                    break
+                elif f['type'] == 'BEARISH' and sub['high'] >= f['bottom']:
+                    mitigated = True
+                    break
+
+            if not mitigated:
+                f['age_candles'] = len(df) - idx
+                unmitigated.append(f)
+
+        return unmitigated
