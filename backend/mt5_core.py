@@ -1,4 +1,4 @@
-# mt5_core.py — Conexão, Killzones com DST Dinâmico dos EUA, Filtro de Spread e Visão Computacional
+# mt5_core.py — Conexão, Killzones com DST Dinâmico dos EUA, Filtro de Spread e Visão Computacional Corrigida
 import MetaTrader5 as mt5
 import pandas as pd
 import numpy as np
@@ -45,17 +45,15 @@ class MT5Engine:
             now_utc = datetime.now(timezone.utc).timestamp()
             diff_seconds = tick.time - now_utc
 
-            # Se a diferença for menor que 12 horas, o mercado está ativo recentemente
             if abs(diff_seconds) < 43200:
                 diff_hours = round(diff_seconds / 3600.0)
                 if -5 <= diff_hours <= 5:
                     self.broker_utc_offset_hours = diff_hours
-                    print(f"🌐 [TIME SYNC] Offset do servidor da corretora calibrado: UTC{'+' if diff_hours >= 0 else ''}{diff_hours}")
+                    print(f"🌐 [TIME SYNC] Offset do servidor calibrado: UTC{'+' if diff_hours >= 0 else ''}{diff_hours}")
                     return
 
-        # Fallback seguro para padrão europeu/EET (FTMO, IC Markets, etc)
         self.broker_utc_offset_hours = 2
-        print(f"🌐 [TIME SYNC] Mercado fechado ou tick desatualizado. Usando fallback padrão: UTC+{self.broker_utc_offset_hours}")
+        print(f"🌐 [TIME SYNC] Usando offset padrão: UTC+{self.broker_utc_offset_hours}")
 
     def resolve_symbol(self, category):
         if category in self.symbol_cache:
@@ -71,12 +69,13 @@ class MT5Engine:
         available_names = [s.name for s in all_symbols]
 
         if category.upper() == 'NASDAQ':
-            targets = ["US100.cash", "US100", "NAS100", "NAS100.cash", "USTEC", "USTEC.cash", "NASUSD", "NQ"]
+            targets = ["US100.cash", "US100", "NAS100", "NAS100.cash", "USTEC", "USTEC.cash", "NASUSD", "NQ", "US100m", "US100.pro"]
         elif category.upper() == 'GOLD':
-            targets = ["XAUUSD", "GOLD", "XAUUSD.cash", "XAUUSD.pro", "XAUUSDm", "XAUUSD.ecn"]
+            targets = ["XAUUSD", "GOLD", "XAUUSD.cash", "XAUUSD.pro", "XAUUSDm", "XAUUSD.ecn", "XAUUSD_sb"]
         else:
             targets = [category]
 
+        # Busca exata primeiro
         for target in targets:
             for symbol_name in available_names:
                 if target.lower() == symbol_name.lower():
@@ -84,6 +83,7 @@ class MT5Engine:
                     self.symbol_cache[category] = symbol_name
                     return symbol_name
 
+        # Busca parcial/subcadeia
         for target in targets:
             for symbol_name in available_names:
                 if target.lower() in symbol_name.lower():
@@ -114,7 +114,6 @@ class MT5Engine:
         return datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=self.broker_utc_offset_hours)
 
     def is_spread_acceptable(self, symbol):
-        """Evita entradas quando o spread dilata por baixa liquidez ou notícias."""
         info = mt5.symbol_info(symbol)
         if not info:
             return False, "Símbolo inacessível"
@@ -125,7 +124,7 @@ class MT5Engine:
 
         max_allowed = 3.5 if is_nasdaq else 0.45
         if spread_pts > max_allowed:
-            return False, f"Spread excessivo ({spread_pts:.2f} pts > teto de {max_allowed} pts)"
+            return False, f"Spread excessivo ({spread_pts:.2f} pts > teto {max_allowed} pts)"
 
         return True, "Spread OK"
 
@@ -133,15 +132,9 @@ class MT5Engine:
 class InstitutionalSessionFilter:
     @staticmethod
     def is_us_daylight_saving(dt_utc):
-        """
-        Calcula se os EUA estão em Horário de Verão (EDT: UTC-4) ou Inverno (EST: UTC-5).
-        Inicia no 2º domingo de março e encerra no 1º domingo de novembro.
-        """
         year = dt_utc.year
-        # Segundo domingo de março (entre 8 e 14 de março)
         march_8 = datetime(year, 3, 8)
         second_sunday_march = march_8 + timedelta(days=(6 - march_8.weekday()) % 7)
-        # Primeiro domingo de novembro (entre 1 e 7 de novembro)
         nov_1 = datetime(year, 11, 1)
         first_sunday_nov = nov_1 + timedelta(days=(6 - nov_1.weekday()) % 7)
 
@@ -149,12 +142,11 @@ class InstitutionalSessionFilter:
 
     @classmethod
     def is_session_active(cls, symbol, broker_candle_time, broker_utc_offset=2):
-        """Valida as Killzones oficiais alinhadas em UTC com detecção de DST de Nova York."""
         candle_utc = broker_candle_time - timedelta(hours=broker_utc_offset)
         utc_hour = candle_utc.hour
         utc_minute = candle_utc.minute
 
-        # Bloqueio estrito de rollover e virada (21h às 02h UTC)
+        # Bloqueio estrito de rollover institucional (21h às 02h UTC)
         if utc_hour >= 21 or utc_hour < 2:
             return False
 
@@ -162,8 +154,8 @@ class InstitutionalSessionFilter:
 
         if is_nasdaq:
             is_dst = cls.is_us_daylight_saving(candle_utc)
-            # No Verão (EDT): 09:30 EDT = 13:30 UTC
-            # No Inverno (EST): 09:30 EST = 14:30 UTC
+            # EDT (Verão EUA): 09:30 EDT = 13:30 UTC
+            # EST (Inverno EUA): 09:30 EST = 14:30 UTC
             ny_open_hour = 13 if is_dst else 14
             ny_close_hour = 17 if is_dst else 18
 
@@ -171,7 +163,7 @@ class InstitutionalSessionFilter:
                 return True
             return False
         else:
-            # XAUUSD: Londres (07:00 às 10:30 UTC) e NY (12:30 às 16:30 UTC)
+            # XAUUSD: Londres (07:00 às 10:30 UTC) e Nova York (12:30 às 16:30 UTC)
             london = (7 <= utc_hour < 10) or (utc_hour == 10 and utc_minute <= 30)
             ny = (12 <= utc_hour < 16) or (utc_hour == 16 and utc_minute <= 30)
             return london or ny
@@ -201,14 +193,19 @@ class VisionLiquidityAnalyzer:
         self.res = resolution
 
     def validate_liquidity_path(self, df, direction, entry_price, tp_price):
-        if df is None or len(df) < 20:
+        """
+        Escala normalizada dinâmica: garante que entry e TP nunca sejam esmagados nos limites
+        da matriz mesmo em perfis de alvo longo (Sniper 1:4).
+        """
+        if df is None or len(df) < 15:
             return True, "Candles insuficientes"
 
-        grid = np.zeros(self.res, dtype=np.float32)
-        min_p = float(df['low'].min())
-        max_p = float(df['high'].max())
-        p_range = max_p - min_p if max_p != min_p else 1.0
+        # Inclui os níveis operacionais na amplitude global do mapa
+        min_p = min(float(df['low'].min()), float(entry_price), float(tp_price))
+        max_p = max(float(df['high'].max()), float(entry_price), float(tp_price))
+        p_range = max_p - min_p if max_p > min_p else 1.0
 
+        grid = np.zeros(self.res, dtype=np.float32)
         n_bars = min(len(df), self.res[0])
         sub_df = df.iloc[-n_bars:]
 
@@ -217,6 +214,12 @@ class VisionLiquidityAnalyzer:
             y_low = int((1.0 - (row['low'] - min_p) / p_range) * (self.res[1] - 1))
             y_open = int((1.0 - (row['open'] - min_p) / p_range) * (self.res[1] - 1))
             y_close = int((1.0 - (row['close'] - min_p) / p_range) * (self.res[1] - 1))
+
+            # Garante limites válidos na matriz
+            y_high = max(0, min(self.res[1] - 1, y_high))
+            y_low = max(0, min(self.res[1] - 1, y_low))
+            y_open = max(0, min(self.res[1] - 1, y_open))
+            y_close = max(0, min(self.res[1] - 1, y_close))
 
             y_min_w = min(y_high, y_low)
             y_max_w = max(y_high, y_low)
@@ -234,10 +237,10 @@ class VisionLiquidityAnalyzer:
         y_tp = max(0, min(self.res[1] - 1, int((1.0 - (tp_price - min_p) / p_range) * (self.res[1] - 1))))
 
         y_start, y_end = min(y_entry, y_tp), max(y_entry, y_tp)
-        path_zone = grid[y_start:y_end, :]
+        path_zone = grid[y_start : y_end + 1, :]
         density = np.sum(path_zone >= 1.0) / (path_zone.size + 1e-5)
 
-        if density > 0.55:
+        if density > 0.58:
             return False, f"Absorção densa ({density:.1%})"
 
         return True, "Livre"

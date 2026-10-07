@@ -1,4 +1,4 @@
-# main.py — Orquestrador HFT com Controle Híbrido Independente (NASDAQ e GOLD)
+# main.py — Orquestrador HFT com Execução de Ordens Blindada e Controle Híbrido Independente
 import time
 import json
 import requests
@@ -62,14 +62,6 @@ class EconomicNewsFilter:
         return False, None
 
 
-def get_best_filling_mode(symbol):
-    info = mt5.symbol_info(symbol)
-    if not info: return mt5.ORDER_FILLING_IOC
-    modes = info.filling_mode
-    if modes & mt5.ORDER_FILLING_IOC: return mt5.ORDER_FILLING_IOC
-    if modes & mt5.ORDER_FILLING_FOK: return mt5.ORDER_FILLING_FOK
-    return mt5.ORDER_FILLING_RETURN
-
 def has_active_order_or_position(symbol):
     positions = mt5.positions_get(symbol=symbol)
     if positions:
@@ -83,23 +75,28 @@ def has_active_order_or_position(symbol):
 
     return False
 
+
 def send_limit_order(symbol, action, entry_price, sl, tp, lot_size):
+    """
+    Executa ordem pendente com proteção de preenchimento (ORDER_FILLING_RETURN prioritário).
+    Caso a corretora exija modo específico, realiza fallback automático.
+    """
     info = mt5.symbol_info(symbol)
     if not info: return False, "Símbolo não localizado"
 
     point = info.point
-    stops_level = info.trade_stops_level * point
+    stops_level = (info.trade_stops_level or 0) * point
 
     if action == "BUY_LIMIT":
         if entry_price >= (info.ask - stops_level):
-            return False, f"Entrada ({entry_price}) inválida para BUY_LIMIT (Ask: {info.ask})"
+            return False, f"Entrada ({entry_price}) muito próxima ou acima do Ask ({info.ask})"
     else:
         if entry_price <= (info.bid + stops_level):
-            return False, f"Entrada ({entry_price}) inválida para SELL_LIMIT (Bid: {info.bid})"
+            return False, f"Entrada ({entry_price}) muito próxima ou abaixo do Bid ({info.bid})"
 
     order_type = mt5.ORDER_TYPE_BUY_LIMIT if action == "BUY_LIMIT" else mt5.ORDER_TYPE_SELL_LIMIT
-    filling = get_best_filling_mode(symbol)
 
+    # Tentativa 1: ORDER_FILLING_RETURN (Padrão institucional aceito pela FTMO e corretores ECN)
     request = {
         "action": mt5.TRADE_ACTION_PENDING,
         "symbol": symbol,
@@ -112,14 +109,24 @@ def send_limit_order(symbol, action, entry_price, sl, tp, lot_size):
         "magic": ROBOT_MAGIC,
         "comment": "LUMI FVG PRO",
         "type_time": mt5.ORDER_TIME_GTC,
-        "type_filling": filling,
+        "type_filling": mt5.ORDER_FILLING_RETURN,
     }
 
     result = mt5.order_send(request)
-    if result.retcode != mt5.TRADE_RETCODE_DONE:
-        return False, f"Retcode {result.retcode} ({result.comment})"
+    if result.retcode == mt5.TRADE_RETCODE_DONE:
+        return True, "Ordem armada com sucesso (RETURN)"
 
-    return True, "Ordem armada com sucesso"
+    # Tentativa 2: Fallback caso retorne erro 10030 (Unsupported filling mode)
+    if result.retcode == 10030:
+        modes = [mt5.ORDER_FILLING_IOC, mt5.ORDER_FILLING_FOK]
+        for mode in modes:
+            request["type_filling"] = mode
+            result = mt5.order_send(request)
+            if result.retcode == mt5.TRADE_RETCODE_DONE:
+                return True, f"Ordem armada com sucesso (Fallback Mode {mode})"
+
+    return False, f"Retcode {result.retcode} ({result.comment})"
+
 
 def purge_stale_pending_orders(max_age_minutes=8):
     orders = mt5.orders_get()
@@ -139,6 +146,7 @@ def purge_stale_pending_orders(max_age_minutes=8):
                     print(f"🧹 [PURGE] Ordem expirada #{o.ticket} cancelada ({int(age_sec/60)}m).")
     return cancelled
 
+
 def cancel_all_pending_orders():
     orders = mt5.orders_get()
     if not orders: return 0
@@ -149,6 +157,7 @@ def cancel_all_pending_orders():
             res = mt5.order_send(req)
             if res.retcode == mt5.TRADE_RETCODE_DONE: cancelled += 1
     return cancelled
+
 
 def close_all_open_positions():
     positions = mt5.positions_get()
@@ -174,8 +183,9 @@ def close_all_open_positions():
             if res.retcode == mt5.TRADE_RETCODE_DONE: closed += 1
     return closed
 
+
 def manage_open_trades(engine, risk_manager, settings):
-    be_enabled = settings.get("breakeven_enabled", False)
+    be_enabled = settings.get("breakeven_enabled", True)
     trailing_enabled = settings.get("trailing_enabled", False)
 
     if not be_enabled and not trailing_enabled:
@@ -193,7 +203,7 @@ def manage_open_trades(engine, risk_manager, settings):
         open_price = p.price_open
         current_sl = p.sl
 
-        # Trailing Stop M1
+        # 1. Trailing Stop M1
         if trailing_enabled:
             df_m1 = engine.get_candles(p.symbol, mt5.TIMEFRAME_M1, 3)
             if df_m1 is not None and len(df_m1) >= 2:
@@ -214,7 +224,7 @@ def manage_open_trades(engine, risk_manager, settings):
                         print(f"📈 [TRAILING M1] #{p.ticket} ({p.symbol}) SL ajustado para {new_trail_sl}")
                     continue
 
-        # Break-Even
+        # 2. Break-Even
         if be_enabled:
             if p.type == mt5.POSITION_TYPE_BUY and current_sl >= open_price: continue
             if p.type == mt5.POSITION_TYPE_SELL and current_sl > 0 and current_sl <= open_price: continue
@@ -229,7 +239,8 @@ def manage_open_trades(engine, risk_manager, settings):
                 }
                 res = mt5.order_send(req)
                 if res.retcode == mt5.TRADE_RETCODE_DONE:
-                    print(f"🛡️ [BREAK-EVEN] #{p.ticket} ({p.symbol}) SL ajustado para {new_be_sl}")
+                    print(f"🛡️ [BREAK-EVEN] #{p.ticket} ({p.symbol}) SL protegido em {new_be_sl}")
+
 
 def get_performance_stats(risk_base=50.0):
     try:
@@ -348,6 +359,7 @@ def get_performance_stats(risk_base=50.0):
                 "realized_pnl": 0.0, "net_r": 0.0, "max_drawdown_usd": 0.0, "profit_factor": 0.0
             }
         }
+
 
 def run_recent_backtest(engine, symbol, days=0, risk_per_trade=50.0):
     if not symbol: return None
@@ -613,7 +625,6 @@ def main():
     vision = VisionLiquidityAnalyzer()
     news_filter = EconomicNewsFilter()
 
-    # Strategy Scout agora ancorado em 30 Dias
     scout = StrategyScout(engine, sync, eval_interval_seconds=3600)
     scout.start()
 
@@ -622,7 +633,7 @@ def main():
     active_mode = "BOTH"
     cached_settings = {}
 
-    sync.add_log(None, "Motor conectado com Controle Híbrido Independente (NASDAQ e GOLD).", "INFO")
+    sync.add_log(None, "Motor conectado com Controle Híbrido Independente e Escudo Persistido.", "INFO")
 
     try:
         while True:
@@ -686,7 +697,6 @@ def main():
                 perf_data = get_performance_stats(risk_base=risk_manager.risk_per_trade_usd)
                 perf_data["scout_directives"] = scout.active_directives
 
-                # Configurações resolvidas independentemente para cada ativo
                 nasdaq_cfg = cached_settings.get("nasdaq") or {
                     "auto_ia": cached_settings.get("auto_profile_ia", False),
                     "profile": cached_settings.get("profile", "guardiao"),
@@ -718,16 +728,15 @@ def main():
                         "require_sweep": dir_gold.get("require_sweep") if gold_cfg.get("auto_ia") else gold_cfg.get("require_sweep", False),
                         "status": "AUTORIZADO" if (dir_gold.get("should_trade") if gold_cfg.get("auto_ia") else True) else "STAND-BY"
                     },
-                    "breakeven": "ATIVO (1.2R)" if cached_settings.get("breakeven_enabled", False) else "DESLIGADO",
+                    "breakeven": "ATIVO (1.2R)" if cached_settings.get("breakeven_enabled", True) else "DESLIGADO",
                     "trailing": "ATIVO (M1)" if cached_settings.get("trailing_enabled", False) else "DESLIGADO"
                 }
 
-                # Heartbeat com telemetria rica
                 sync.send_heartbeat("hibrido", pnl_today, login, balance, equity, server, perf_data)
 
             manage_open_trades(engine, risk_manager, cached_settings)
 
-            if is_news:
+            if is_news or risk_manager.daily_lock_active:
                 time.sleep(1)
                 continue
 
@@ -744,7 +753,7 @@ def main():
                 if has_active_order_or_position(symbol):
                     continue
 
-                spread_ok, spread_msg = engine.is_spread_acceptable(symbol)
+                spread_ok, _ = engine.is_spread_acceptable(symbol)
                 if not spread_ok:
                     continue
 
@@ -754,7 +763,6 @@ def main():
                 ):
                     continue
 
-                # RESOLUÇÃO HÍBRIDA POR ATIVO (AUTO IA 30D vs MANUAL)
                 cfg_key = "nasdaq" if category == "NASDAQ" else "gold"
                 asset_cfg = cached_settings.get(cfg_key) or {
                     "auto_ia": cached_settings.get("auto_profile_ia", False),
@@ -766,7 +774,6 @@ def main():
                 is_auto_asset = bool(asset_cfg.get("auto_ia", False))
                 directive = scout.get_directive(category)
 
-                # Se a IA estiver comandando este ativo e o score de 30D for negativo, trava em STAND-BY
                 if is_auto_asset and not directive.get("should_trade", True):
                     continue
 
