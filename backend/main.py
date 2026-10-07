@@ -1,4 +1,4 @@
-# main.py — Orquestrador com A/B Backtest (Com/Sem BE), Net R do Dia e Telemetria Scout
+# main.py — Orquestrador HFT com Modo Manual/IA Flexível e Stop Loss Institucional Calibrado
 import time
 import json
 from datetime import datetime, timedelta
@@ -48,10 +48,10 @@ def send_limit_order(symbol, action, entry_price, sl, tp, lot_size):
 
     if action == "BUY_LIMIT":
         if entry_price >= (info.ask - stops_level):
-            return False, f"Entrada ({entry_price}) muito alta para BUY_LIMIT (Ask: {info.ask})"
+            return False, f"Entrada ({entry_price}) inválida para BUY_LIMIT (Ask: {info.ask})"
     else:
         if entry_price <= (info.bid + stops_level):
-            return False, f"Entrada ({entry_price}) muito baixa para SELL_LIMIT (Bid: {info.bid})"
+            return False, f"Entrada ({entry_price}) inválida para SELL_LIMIT (Bid: {info.bid})"
 
     order_type = mt5.ORDER_TYPE_BUY_LIMIT if action == "BUY_LIMIT" else mt5.ORDER_TYPE_SELL_LIMIT
     filling = get_best_filling_mode(symbol)
@@ -92,7 +92,7 @@ def purge_stale_pending_orders(max_age_minutes=15):
                 res = mt5.order_send(req)
                 if res.retcode == mt5.TRADE_RETCODE_DONE:
                     cancelled += 1
-                    print(f"🧹 [PURGE] Cancelada ordem #{o.ticket} ({o.symbol}) ({int(age_sec/60)}m).")
+                    print(f"🧹 [PURGE] Ordem #{o.ticket} cancelada ({int(age_sec/60)}m).")
     return cancelled
 
 def cancel_all_pending_orders():
@@ -158,7 +158,6 @@ def manage_open_trades(risk_manager, settings):
                 print(f"🛡️ [BREAK-EVEN] #{p.ticket} ({p.symbol}) SL ajustado para {new_sl}")
 
 def get_today_performance(risk_base=50.0):
-    """Calcula estatísticas do dia incluindo Net R real (R:R acumulado)."""
     try:
         now = datetime.now()
         start_of_day = datetime(now.year, now.month, now.day, 0, 0, 0)
@@ -227,12 +226,10 @@ def get_today_performance(risk_base=50.0):
             "realized_pnl": 0.0, "net_r": 0.0, "open_count": 0, "open_positions": [], "closed_trades": []
         }
 
-def run_recent_backtest(engine, symbol, days=2, risk_per_trade=50.0, use_ce_50=True):
+def run_recent_backtest(engine, symbol, days=5, risk_per_trade=50.0, use_ce_50=True, require_sweep=False, use_session_filter=True):
     """
-    Backtest Institucional A/B:
-    Sempre simula e compara lado a lado:
-    1. Trilha COM Break-Even (em 1.2R)
-    2. Trilha SEM Break-Even (deixa correr até o alvo ou stop integral)
+    Backtest Institucional A/B Calibrado:
+    Simula e compara lado a lado COM e SEM Break-Even, com espaço para volatilidade.
     """
     if not symbol: return None
     total_m5 = int(days) * 240
@@ -244,7 +241,8 @@ def run_recent_backtest(engine, symbol, days=2, risk_per_trade=50.0, use_ce_50=T
     if df_m5 is None or df_m1 is None: return None
 
     is_nasdaq = "US100" in symbol or "NAS" in symbol or "USTEC" in symbol
-    max_risk = 25.0 if is_nasdaq else 3.5
+    min_stop_points = 6.0 if is_nasdaq else 1.2
+    max_risk = 30.0 if is_nasdaq else 4.5
 
     detector = FVGDetector()
     vision = VisionLiquidityAnalyzer()
@@ -254,14 +252,12 @@ def run_recent_backtest(engine, symbol, days=2, risk_per_trade=50.0, use_ce_50=T
     m1_lows = df_m1['low'].values
     m1_times = df_m1['time'].values
 
-    # Contadores SEM Break-Even
     no_be = {
         "sniper": {"wins": 0, "losses": 0},
         "tatico": {"wins": 0, "losses": 0},
         "guardiao": {"wins": 0, "losses": 0}
     }
 
-    # Contadores COM Break-Even
     with_be = {
         "sniper": {"wins": 0, "losses": 0, "be_count": 0},
         "tatico": {"wins": 0, "losses": 0, "be_count": 0},
@@ -271,13 +267,18 @@ def run_recent_backtest(engine, symbol, days=2, risk_per_trade=50.0, use_ce_50=T
     valid_setups = 0
 
     for f in fvgs:
-        if not InstitutionalSessionFilter.is_session_active(symbol, f['raw_time']):
+        if use_session_filter and not InstitutionalSessionFilter.is_session_active(symbol, f['raw_time']):
+            continue
+
+        if require_sweep and not f.get("has_sweep", False):
             continue
 
         direction = "BUY" if f['type'] == 'BULLISH' else "SELL"
         entry = f['ce_50'] if use_ce_50 else (f['top'] if direction == "BUY" else f['bottom'])
-        raw_risk = abs(entry - (f['bottom'] if direction == "BUY" else f['top'])) + (1.0 if is_nasdaq else 0.3)
-        risk = min(max(raw_risk, 1.5 if is_nasdaq else 0.4), max_risk)
+
+        # Stop Técnico Seguro (não deixa ficar menor que o ruído mínimo do ativo)
+        raw_dist = abs(entry - (f['bottom'] if direction == "BUY" else f['top']))
+        risk = min(max(raw_dist + (1.5 if is_nasdaq else 0.5), min_stop_points), max_risk)
 
         tp_tatico = entry + (risk * 2.5) if direction == "BUY" else entry - (risk * 2.5)
 
@@ -295,27 +296,25 @@ def run_recent_backtest(engine, symbol, days=2, risk_per_trade=50.0, use_ce_50=T
 
         if start_idx == 0: continue
 
-        # Janela de resolução de 90 candles M1
-        sim_slice_h = m1_highs[start_idx : min(start_idx + 90, len(m1_highs))]
-        sim_slice_l = m1_lows[start_idx : min(start_idx + 90, len(m1_lows))]
+        # Janela de resolução de 120 velas M1 (2 horas)
+        sim_slice_h = m1_highs[start_idx : min(start_idx + 120, len(m1_highs))]
+        sim_slice_l = m1_lows[start_idx : min(start_idx + 120, len(m1_lows))]
 
         for prof, mult in [('sniper', 4.0), ('tatico', 2.5), ('guardiao', 1.5)]:
             tp = entry + (risk * mult) if direction == "BUY" else entry - (risk * mult)
             sl = entry - risk if direction == "BUY" else entry + risk
 
             triggered = False
-            # Trilha SEM BE
             win_no_be, loss_no_be = False, False
-            # Trilha COM BE
             win_with_be, loss_with_be, hit_be = False, False, False
 
             for h, l in zip(sim_slice_h, sim_slice_l):
                 if not triggered:
                     if direction == "BUY" and l <= entry: triggered = True
                     elif direction == "SELL" and h >= entry: triggered = True
-                    continue
+                    if not triggered: continue
 
-                # 1. Simulação SEM BE
+                # Trilha Sem Break-Even
                 if not (win_no_be or loss_no_be):
                     if direction == "BUY":
                         if l <= sl: loss_no_be = True
@@ -324,43 +323,29 @@ def run_recent_backtest(engine, symbol, days=2, risk_per_trade=50.0, use_ce_50=T
                         if h >= sl: loss_no_be = True
                         elif l <= tp: win_no_be = True
 
-                # 2. Simulação COM BE (aciona aos 1.2R)
+                # Trilha Com Break-Even (em 1.2R)
                 if not (win_with_be or loss_with_be or hit_be):
                     if not hit_be:
                         if direction == "BUY" and h >= (entry + risk * 1.2): hit_be = True
                         elif direction == "SELL" and l <= (entry - risk * 1.2): hit_be = True
 
                     if direction == "BUY":
-                        if hit_be and l <= entry:
-                            # Encerra no zero a zero
-                            break
-                        elif not hit_be and l <= sl:
-                            loss_with_be = True
-                            break
-                        elif h >= tp:
-                            win_with_be = True
-                            break
+                        if hit_be and l <= entry: break
+                        elif not hit_be and l <= sl: loss_with_be = True; break
+                        elif h >= tp: win_with_be = True; break
                     else:
-                        if hit_be and h >= entry:
-                            break
-                        elif not hit_be and h >= sl:
-                            loss_with_be = True
-                            break
-                        elif l <= tp:
-                            win_with_be = True
-                            break
+                        if hit_be and h >= entry: break
+                        elif not hit_be and h >= sl: loss_with_be = True; break
+                        elif l <= tp: win_with_be = True; break
 
             if triggered:
-                # Contabiliza SEM BE
                 if win_no_be: no_be[prof]["wins"] += 1
                 elif loss_no_be: no_be[prof]["losses"] += 1
 
-                # Contabiliza COM BE
                 if win_with_be: with_be[prof]["wins"] += 1
                 elif loss_with_be: with_be[prof]["losses"] += 1
                 elif hit_be and not win_with_be: with_be[prof]["be_count"] += 1
 
-    # Formata resultados comparativos
     def build_stats(w, l, mult, be_cnt=0):
         tot = w + l
         rate = int((w / tot) * 100) if tot > 0 else 0
@@ -382,10 +367,9 @@ def run_recent_backtest(engine, symbol, days=2, risk_per_trade=50.0, use_ce_50=T
         "guardiao": build_stats(with_be["guardiao"]["wins"], with_be["guardiao"]["losses"], 1.5, with_be["guardiao"]["be_count"])
     }
 
-    # Melhor perfil geral comparando PnL
     best_pnl = -99999
-    recommended_mode = "TACTICAL_WITH_BE"
-    for label, rep, is_be in [("WITHOUT_BE", report_no_be, False), ("WITH_BE", report_with_be, True)]:
+    recommended_mode = "TACTICAL (COM BE)"
+    for rep, is_be in [(report_no_be, False), (report_with_be, True)]:
         for p_name in ["guardiao", "tatico", "sniper"]:
             pnl_val = rep[p_name]["pnl"]
             if pnl_val > best_pnl:
@@ -401,12 +385,11 @@ def run_recent_backtest(engine, symbol, days=2, risk_per_trade=50.0, use_ce_50=T
         "base_risk": risk_per_trade,
         "strategy_info": {
             "entry": "50% Consequent Encroachment" if use_ce_50 else "Borda do FVG",
-            "sessions": "Killzones de Alta Liquidez",
+            "sessions": "Killzones Ativas" if use_session_filter else "24 Horas",
             "cv_filter": "Barreiras de Absorção Ativas"
         },
         "without_be": report_no_be,
         "with_be": report_with_be,
-        # Mantém compatibilidade com dashboard existente
         "sniper": report_with_be["sniper"],
         "tatico": report_with_be["tatico"],
         "guardiao": report_with_be["guardiao"],
@@ -436,14 +419,14 @@ def main():
     active_mode = "BOTH"
     cached_settings = {}
 
-    sync.add_log(None, "Motor inicializado com Dashboard Sync e A/B Backtesting.", "INFO")
+    sync.add_log(None, "Motor inicializado com controle manual/IA e Stop calibrado.", "INFO")
 
     try:
         while True:
             tick_ref = mt5.symbol_info_tick("XAUUSD") or mt5.symbol_info_tick("US100.cash")
             broker_time = datetime.fromtimestamp(tick_ref.time) if tick_ref else datetime.now()
 
-            # 1. Telemetria e Escudo
+            # 1. Telemetria e Escudo de Mesa
             acc = mt5.account_info()
             if acc:
                 balance, equity = acc.balance, acc.equity
@@ -483,13 +466,18 @@ def main():
                             parts = cmd.split(":")
                             cat = "NASDAQ" if "US100" in parts[1] else "GOLD"
                             real_sym = engine.resolve_symbol(cat)
-                            days = int(parts[2]) if len(parts) > 2 else 2
+                            days = int(parts[2]) if len(parts) > 2 else 5
 
+                            is_auto = cached_settings.get("auto_profile_ia", False)
                             scout_dir = scout.get_directive(cat)
-                            use_ce = scout_dir.get("use_ce_50", True)
+
+                            use_ce = scout_dir.get("use_ce_50", True) if is_auto else cached_settings.get("use_ce_50", True)
+                            req_sweep = scout_dir.get("require_sweep", False) if is_auto else cached_settings.get("require_sweep", False)
+                            use_sess = cached_settings.get("use_session_filter", True)
 
                             rep = run_recent_backtest(
-                                engine, real_sym, days, risk_manager.risk_per_trade_usd, use_ce_50=use_ce
+                                engine, real_sym, days, risk_manager.risk_per_trade_usd,
+                                use_ce_50=use_ce, require_sweep=req_sweep, use_session_filter=use_sess
                             )
                             if rep:
                                 try: sync.client.table("copilot_status").update({"last_backtest": rep}).eq("id", 1).execute()
@@ -506,7 +494,7 @@ def main():
                 today_stats["scout_directives"] = scout.active_directives
                 today_stats["is_auto_ai"] = bool(cached_settings.get("auto_profile_ia", False))
                 today_stats["active_strategy"] = {
-                    "entry_type": "50% Consequent Encroachment (CE)",
+                    "entry_type": "50% Consequent Encroachment (CE)" if cached_settings.get("use_ce_50", True) else "Borda do FVG",
                     "breakeven": "ATIVO (1.2R)" if cached_settings.get("breakeven_enabled", True) else "DESLIGADO",
                     "trailing": "ATIVO" if cached_settings.get("trailing_enabled", False) else "DESLIGADO"
                 }
@@ -526,22 +514,24 @@ def main():
                 sym_gold = engine.resolve_symbol("GOLD")
                 if sym_gold: targets.append(("GOLD", sym_gold))
 
-            # 5. Varredura Operacional
+            # 5. Varredura Operacional Institucional
             for category, symbol in targets:
                 if has_active_order_or_position(symbol):
                     continue
 
-                if not InstitutionalSessionFilter.is_session_active(symbol, broker_time):
+                use_sess = cached_settings.get("use_session_filter", True)
+                if use_sess and not InstitutionalSessionFilter.is_session_active(symbol, broker_time):
                     continue
 
-                # Consulta diretriz do Scout
+                is_auto = cached_settings.get("auto_profile_ia", False)
                 directive = scout.get_directive(category)
-                if not directive.get("should_trade", True):
-                    # Mercado em Stand-By de acordo com o Scout
+
+                if is_auto and not directive.get("should_trade", True):
                     continue
 
-                # Se a IA estiver no comando automático, adota o perfil recomendado pelo Scout
-                active_profile_for_trade = directive.get("recommended_profile", current_profile) if cached_settings.get("auto_profile_ia") else current_profile
+                active_profile_for_trade = directive.get("recommended_profile", current_profile) if is_auto else current_profile
+                use_ce_50 = directive.get("use_ce_50", True) if is_auto else cached_settings.get("use_ce_50", True)
+                require_sweep = directive.get("require_sweep", False) if is_auto else cached_settings.get("require_sweep", False)
 
                 df_m15 = engine.get_candles(symbol, mt5.TIMEFRAME_M15, 30)
                 df_m5 = engine.get_candles(symbol, mt5.TIMEFRAME_M5, 30)
@@ -557,9 +547,6 @@ def main():
                 info = mt5.symbol_info(symbol)
                 spread = info.spread if info else 10
                 ia_agent.update_macro_regime_async(category, structure, atr, spread)
-
-                use_ce_50 = directive.get("use_ce_50", True)
-                require_sweep = directive.get("require_sweep", False)
 
                 fvgs = fvg_detector.find_unmitigated_fvgs(df_m5, symbol)
 
@@ -579,7 +566,7 @@ def main():
                     direction = "BUY" if fvg['type'] == 'BULLISH' else "SELL"
                     entry_candidate = fvg['ce_50'] if use_ce_50 else (fvg['top'] if direction == "BUY" else fvg['bottom'])
 
-                    max_dist = 18.0 if "US100" in symbol or "NAS" in symbol else 3.0
+                    max_dist = 22.0 if "US100" in symbol or "NAS" in symbol else 3.5
                     dist = abs(current_price - entry_candidate)
                     if dist > max_dist:
                         processed_fvgs.add(fvg_id)
@@ -613,7 +600,7 @@ def main():
 
                     ok, order_msg = send_limit_order(symbol, action, params["entry"], params["sl"], params["tp"], lot)
                     if ok:
-                        sync.add_log(symbol, f"ORDEM ARMADA ({'IA' if cached_settings.get('auto_profile_ia') else 'MANUAL'} | {active_profile_for_trade.upper()}): {action} {lot}L @ {params['entry']}", "SUCCESS")
+                        sync.add_log(symbol, f"ORDEM ARMADA ({'IA' if is_auto else 'MANUAL'} | {active_profile_for_trade.upper()}): {action} {lot}L @ {params['entry']}", "SUCCESS")
                         processed_fvgs.add(fvg_id)
                         break
                     else:

@@ -1,3 +1,12 @@
 @import "tailwindcss";
 
-/* index.css — Configuração base do Tailwind */
+/* index.css — Utilitário para ocultar barras de rolagem */
+@layer utilities {
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+  .no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+}

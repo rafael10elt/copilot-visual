@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { 
   UserCheck, Power, Sparkles, BarChart3, AlertTriangle, X, 
   CheckCircle2, Trophy, ArrowRight, Loader2, Activity, Clock, 
-  Radar, Cpu, Sliders, ShieldCheck, Zap, Crosshair, SplitSquareVertical
+  Radar, Cpu, Sliders, ShieldCheck, Zap, Crosshair
 } from 'lucide-react';
 
 export default function Dashboard({ 
@@ -21,8 +21,8 @@ export default function Dashboard({
 
   const [showEmergencyModal, setShowEmergencyModal] = useState(false);
   const [selectedAsset, setSelectedAsset] = useState('US100');
-  const [selectedDays, setSelectedDays] = useState(2);
-  const [backtestViewTab, setBacktestViewTab] = useState('compare'); // 'compare', 'with_be', 'no_be'
+  const [selectedDays, setSelectedDays] = useState(5);
+  const [backtestViewTab, setBacktestViewTab] = useState('compare');
 
   const currentRiskBase = Number(settings?.risk_per_trade || 50);
   const stats = status?.today_stats || {
@@ -40,8 +40,8 @@ export default function Dashboard({
   const scoutDirectives = stats?.scout_directives || null;
   const isAutoAI = stats?.is_auto_ai ?? !!settings?.auto_profile_ia;
   const activeStrategy = stats?.active_strategy || {
-    entry_type: "50% Consequent Encroachment (CE)",
-    breakeven: settings?.breakeven_enabled ? "ATIVO (1.2R)" : "DESLIGADO"
+    entry_type: settings?.use_ce_50 !== false ? "50% Consequent Encroachment (CE)" : "Borda do FVG",
+    breakeven: settings?.breakeven_enabled !== false ? "ATIVO (1.2R)" : "DESLIGADO"
   };
 
   const handleBacktestClick = () => {
@@ -78,7 +78,7 @@ export default function Dashboard({
         </div>
       </div>
 
-      {/* 2. STATUS DE CONTROLE: IA / AUTO VS MANUAL & ESTRATÉGIA NO COMANDO */}
+      {/* 2. MODO OPERACIONAL E ESTRATÉGIA NO COMANDO */}
       <div className="bg-gradient-to-r from-zinc-900 via-zinc-900/90 to-zinc-950 border border-zinc-800 p-3.5 rounded-2xl shadow-lg space-y-2.5">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -110,12 +110,12 @@ export default function Dashboard({
         </div>
       </div>
 
-      {/* 3. RADAR DO STRATEGY SCOUT (EM TEMPO REAL) */}
+      {/* 3. RADAR DO STRATEGY SCOUT */}
       <div className="bg-zinc-900/90 border border-zinc-800 p-4 rounded-2xl shadow-xl space-y-2.5">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Radar size={15} className="text-amber-400 animate-pulse" />
-            <h4 className="text-xs font-bold text-zinc-200 uppercase font-mono">Strategy Scout (Diretrizes 48h)</h4>
+            <h4 className="text-xs font-bold text-zinc-200 uppercase font-mono">Strategy Scout (Diretrizes)</h4>
           </div>
           <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-zinc-800 text-amber-300 border border-amber-500/20">
             Auto-Calibrador
@@ -124,7 +124,6 @@ export default function Dashboard({
 
         {scoutDirectives ? (
           <div className="grid grid-cols-2 gap-2">
-            {/* NASDAQ */}
             <div className="bg-zinc-950 p-2.5 rounded-xl border border-zinc-800/80 space-y-1">
               <div className="flex items-center justify-between">
                 <span className="text-[10px] font-bold text-zinc-300 font-mono">NASDAQ</span>
@@ -145,7 +144,6 @@ export default function Dashboard({
               </div>
             </div>
 
-            {/* GOLD */}
             <div className="bg-zinc-950 p-2.5 rounded-xl border border-zinc-800/80 space-y-1">
               <div className="flex items-center justify-between">
                 <span className="text-[10px] font-bold text-zinc-300 font-mono">XAUUSD (GOLD)</span>
@@ -190,7 +188,7 @@ export default function Dashboard({
         </div>
       </div>
 
-      {/* 5. CONTADORES REAIS DO DIA COM RR REAL (NET R) */}
+      {/* 5. CONTADORES REAIS COM NET R */}
       <div className="bg-zinc-900/90 border border-zinc-800 p-4 rounded-2xl shadow-xl space-y-3">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -258,18 +256,18 @@ export default function Dashboard({
             </div>
           ) : (
             <div className="p-2.5 bg-zinc-950/60 border border-zinc-800/60 rounded-xl text-center text-[10px] font-mono text-zinc-500">
-              Nenhuma posição aberta. Monitorando desequilíbrios recentes...
+              Nenhuma posição aberta no momento...
             </div>
           )}
         </div>
 
-        {/* ÚLTIMOS TRADES FECHADOS HOJE */}
+        {/* ÚLTIMOS TRADES */}
         {stats.closed_trades && stats.closed_trades.length > 0 && (
           <div>
             <span className="text-[10px] font-mono text-zinc-400 uppercase tracking-wider block mb-1.5">
-              Recent Closed Trades
+              Recent Closed Deals
             </span>
-            <div className="space-y-1 max-h-28 overflow-y-auto pr-1">
+            <div className="space-y-1 max-h-28 overflow-y-auto no-scrollbar pr-1">
               {stats.closed_trades.map((deal) => (
                 <div key={deal.ticket} className="bg-zinc-950/80 border border-zinc-800/50 p-2 rounded-lg flex items-center justify-between text-[10px] font-mono">
                   <div className="flex items-center gap-1.5">
@@ -369,17 +367,17 @@ export default function Dashboard({
         </button>
       </div>
 
-      {/* 7. BOTÃO TRAVA DE EMERGÊNCIA */}
+      {/* 7. TRAVA DE EMERGÊNCIA */}
       <button
         onClick={() => setShowEmergencyModal(true)}
         className="w-full py-3 bg-rose-950/40 hover:bg-rose-900/60 border border-rose-800/60 text-rose-300 rounded-xl text-xs font-bold font-mono uppercase tracking-wider flex items-center justify-center gap-2 transition-all">
         <Power size={14} /> Trava de Emergência (Zerar Tudo)
       </button>
 
-      {/* 8. MODAL DO BACKTEST COMPLETO (COM VS SEM BE) */}
+      {/* 8. MODAL DO BACKTEST COMPLETO (SEM BARRA LATERAL FEIA) */}
       {showReportModal && (
         <div className="fixed inset-0 bg-black/85 backdrop-blur-sm z-50 flex items-center justify-center p-3 sm:p-4">
-          <div className="bg-zinc-900 border border-zinc-800 w-full max-w-lg rounded-2xl p-5 shadow-2xl relative animate-in fade-in zoom-in-95 duration-150 space-y-4 max-h-[92vh] overflow-y-auto">
+          <div className="bg-zinc-900 border border-zinc-800 w-full max-w-lg rounded-2xl p-5 shadow-2xl relative animate-in fade-in zoom-in-95 duration-150 space-y-4 max-h-[92vh] overflow-y-auto no-scrollbar">
             <button
               onClick={() => setShowReportModal(false)}
               className="absolute top-4 right-4 text-zinc-500 hover:text-zinc-200">
@@ -390,9 +388,9 @@ export default function Dashboard({
               <div className="py-12 flex flex-col items-center justify-center text-center space-y-3">
                 <Loader2 size={36} className="animate-spin text-amber-400" />
                 <div>
-                  <h3 className="text-sm font-bold text-zinc-100 font-mono">Executando Simulação Comparativa A/B</h3>
+                  <h3 className="text-sm font-bold text-zinc-100 font-mono">Executando Simulação A/B Completa</h3>
                   <p className="text-[11px] text-zinc-400 font-mono mt-1">
-                    Calculando cenários Com Break-Even e Sem Break-Even vela a vela...
+                    Analisando retestes, spreads e proteções de Break-Even...
                   </p>
                 </div>
               </div>
@@ -412,7 +410,6 @@ export default function Dashboard({
                   </div>
                 </div>
 
-                {/* DETALHES DA ESTRATÉGIA DO TESTE */}
                 {latestBacktest.strategy_info && (
                   <div className="bg-zinc-950 p-2.5 rounded-xl border border-zinc-800/80 grid grid-cols-3 gap-2 text-[9px] font-mono text-zinc-400">
                     <div>
@@ -430,7 +427,7 @@ export default function Dashboard({
                   </div>
                 )}
 
-                {/* TABS COMPARATIVAS: COM BE vs SEM BE */}
+                {/* TABS COMPARATIVAS */}
                 <div className="grid grid-cols-3 gap-1 bg-zinc-950 p-1 rounded-xl border border-zinc-800 text-[10px] font-mono font-bold">
                   <button
                     onClick={() => setBacktestViewTab('compare')}
@@ -455,7 +452,7 @@ export default function Dashboard({
                   </button>
                 </div>
 
-                {/* TABELA COMPARATIVA LADO A LADO */}
+                {/* VISÃO COMPARATIVA */}
                 {backtestViewTab === 'compare' && (
                   <div className="space-y-2">
                     {[
@@ -473,7 +470,6 @@ export default function Dashboard({
                           </div>
 
                           <div className="grid grid-cols-2 gap-2 text-[10px] font-mono">
-                            {/* COM BE */}
                             <div className="bg-zinc-900/60 p-2 rounded-lg border border-zinc-800/50">
                               <span className="text-[9px] text-emerald-400 font-bold block mb-1">COM BREAK-EVEN</span>
                               <div className="space-y-0.5 text-zinc-400">
@@ -484,7 +480,6 @@ export default function Dashboard({
                               </div>
                             </div>
 
-                            {/* SEM BE */}
                             <div className="bg-zinc-900/60 p-2 rounded-lg border border-zinc-800/50">
                               <span className="text-[9px] text-blue-400 font-bold block mb-1">SEM BREAK-EVEN</span>
                               <div className="space-y-0.5 text-zinc-400">
@@ -500,7 +495,7 @@ export default function Dashboard({
                   </div>
                 )}
 
-                {/* VISÃO INDIVIDUAL: COM BE OU SEM BE */}
+                {/* VISÃO INDIVIDUAL */}
                 {backtestViewTab !== 'compare' && (
                   <div className="space-y-2">
                     {['guardiao', 'tatico', 'sniper'].map((pKey) => {
@@ -528,7 +523,6 @@ export default function Dashboard({
                   </div>
                 )}
 
-                {/* CAMPEÃO RECOMENDADO */}
                 <div className="bg-zinc-950 p-3 rounded-xl border border-zinc-800/80 flex items-center justify-between">
                   <div>
                     <span className="text-[9px] text-zinc-500 font-mono uppercase block">Melhor Estrutura Global</span>

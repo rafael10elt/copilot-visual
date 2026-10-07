@@ -1,9 +1,10 @@
 import React from 'react';
-import { Crosshair, ShieldCheck, Zap, Bot, ArrowRightLeft, ShieldAlert } from 'lucide-react';
+import { Crosshair, ShieldCheck, Zap, Bot, Sliders, Layers, Target, Clock } from 'lucide-react';
 
 export default function ControlPanel({ settings, onUpdateSettings }) {
   const currentProfile = settings?.profile || 'tatico';
   const activeMode = settings?.active_symbol_mode || 'BOTH';
+  const isAutoAI = !!settings?.auto_profile_ia;
 
   const handleToggle = (field) => {
     onUpdateSettings({ [field]: !settings?.[field] });
@@ -65,7 +66,7 @@ export default function ControlPanel({ settings, onUpdateSettings }) {
           <label className="text-[11px] font-mono uppercase tracking-wider text-zinc-400">
             3. Execution Profile (R:R)
           </label>
-          {settings?.auto_profile_ia && (
+          {isAutoAI && (
             <span className="text-[9px] bg-violet-500/20 text-violet-300 border border-violet-500/30 px-1.5 py-0.5 rounded font-mono font-bold">
               AI MANAGED
             </span>
@@ -103,15 +104,83 @@ export default function ControlPanel({ settings, onUpdateSettings }) {
                 : 'bg-zinc-950 border-zinc-800 text-zinc-400'
             }`}>
             <ShieldCheck size={16} />
-            <span className="text-[10px] font-bold font-mono">GUARDIAN</span>
+            <span className="text-[10px] font-bold font-mono">GUARDIAN (1:1.5)</span>
           </button>
         </div>
       </div>
 
-      {/* 4. OS TOGGLES DE AUTOMAÇÃO */}
+      {/* 4. CONFIGURAÇÃO MANUAL DE ESTRATÉGIA */}
+      <div className={`bg-zinc-900/90 border border-zinc-800 rounded-2xl p-4 space-y-3 transition-opacity ${
+        isAutoAI ? 'opacity-50 pointer-events-none' : 'opacity-100'
+      }`}>
+        <div className="flex items-center justify-between">
+          <label className="text-[11px] font-mono uppercase tracking-wider text-zinc-400 flex items-center gap-1.5">
+            <Sliders size={13} className="text-amber-400" />
+            4. Manual Strategy Parameters
+          </label>
+          {isAutoAI && (
+            <span className="text-[9px] text-zinc-500 font-mono">Desative 'AI Auto-Adapt' para editar</span>
+          )}
+        </div>
+
+        {/* Tipo de Entrada: 50% CE vs Borda */}
+        <div>
+          <span className="text-[10px] text-zinc-400 font-mono block mb-1.5">Ponto de Entrada FVG:</span>
+          <div className="grid grid-cols-2 gap-2">
+            <button
+              onClick={() => onUpdateSettings({ use_ce_50: true })}
+              className={`py-1.5 rounded-xl text-[11px] font-mono font-bold border transition-all ${
+                settings?.use_ce_50 !== false
+                  ? 'bg-violet-500/10 border-violet-500/40 text-violet-300'
+                  : 'bg-zinc-950 border-zinc-800 text-zinc-500'
+              }`}>
+              50% (Consequent Encroachment)
+            </button>
+            <button
+              onClick={() => onUpdateSettings({ use_ce_50: false })}
+              className={`py-1.5 rounded-xl text-[11px] font-mono font-bold border transition-all ${
+                settings?.use_ce_50 === false
+                  ? 'bg-violet-500/10 border-violet-500/40 text-violet-300'
+                  : 'bg-zinc-950 border-zinc-800 text-zinc-500'
+              }`}>
+              Borda do FVG (Tradicional)
+            </button>
+          </div>
+        </div>
+
+        {/* Filtro de Liquidity Sweep */}
+        <div className="flex items-center justify-between py-1 border-t border-zinc-800/60">
+          <div>
+            <strong className="text-xs text-zinc-200 block">Exigir Liquidity Sweep Prévio</strong>
+            <span className="text-[10px] text-zinc-500 block">Só entra se varreu topo/fundo recente</span>
+          </div>
+          <input
+            type="checkbox"
+            checked={!!settings?.require_sweep}
+            onChange={() => handleToggle('require_sweep')}
+            className="w-5 h-5 accent-violet-600 rounded cursor-pointer"
+          />
+        </div>
+
+        {/* Filtro de Sessões (Killzones) */}
+        <div className="flex items-center justify-between py-1 border-t border-zinc-800/60">
+          <div>
+            <strong className="text-xs text-zinc-200 block">Filtrar por Killzones</strong>
+            <span className="text-[10px] text-zinc-500 block">Opera apenas nas janelas de Londres e NY</span>
+          </div>
+          <input
+            type="checkbox"
+            checked={settings?.use_session_filter !== false}
+            onChange={() => handleToggle('use_session_filter')}
+            className="w-5 h-5 accent-emerald-600 rounded cursor-pointer"
+          />
+        </div>
+      </div>
+
+      {/* 5. TOGGLES DE AUTOMAÇÃO */}
       <div className="bg-zinc-900/90 border border-zinc-800 rounded-2xl p-4 space-y-3">
         <label className="text-[11px] font-mono uppercase tracking-wider text-zinc-400 block mb-1">
-          4. Smart Toggles
+          5. Smart Toggles
         </label>
 
         {/* AI Auto-Adapt */}
@@ -122,7 +191,7 @@ export default function ControlPanel({ settings, onUpdateSettings }) {
               <strong className="text-xs text-zinc-200">AI Auto-Adapt Profile</strong>
             </div>
             <span className="text-[10px] text-zinc-500 block">
-              Groq switches profile automatically based on 5-day backtest & volatility
+              IA & Scout assumem perfil e parâmetros dinamicamente
             </span>
           </div>
           <input
@@ -136,42 +205,28 @@ export default function ControlPanel({ settings, onUpdateSettings }) {
         {/* Break-even */}
         <div className="flex items-center justify-between py-1.5 border-b border-zinc-800/60">
           <div>
-            <strong className="text-xs text-zinc-200 block">Auto Break-Even</strong>
-            <span className="text-[10px] text-zinc-500 block">Move SL to Entry Price at 1:1 R:R</span>
+            <strong className="text-xs text-zinc-200 block">Auto Break-Even (1.2R)</strong>
+            <span className="text-[10px] text-zinc-500 block">Move SL para o ponto de entrada no lucro</span>
           </div>
           <input
             type="checkbox"
-            checked={!!settings?.breakeven_enabled}
+            checked={settings?.breakeven_enabled !== false}
             onChange={() => handleToggle('breakeven_enabled')}
             className="w-5 h-5 accent-emerald-600 rounded cursor-pointer"
           />
         </div>
 
         {/* Trailing Stop */}
-        <div className="flex items-center justify-between py-1.5 border-b border-zinc-800/60">
+        <div className="flex items-center justify-between py-1.5">
           <div>
             <strong className="text-xs text-zinc-200 block">Trailing Stop (M1)</strong>
-            <span className="text-[10px] text-zinc-500 block">Trail candle-by-candle once in profit</span>
+            <span className="text-[10px] text-zinc-500 block">Rastreia vela a vela após atingir 1.5R</span>
           </div>
           <input
             type="checkbox"
             checked={!!settings?.trailing_enabled}
             onChange={() => handleToggle('trailing_enabled')}
             className="w-5 h-5 accent-blue-600 rounded cursor-pointer"
-          />
-        </div>
-
-        {/* Parciais */}
-        <div className="flex items-center justify-between py-1.5">
-          <div>
-            <strong className="text-xs text-zinc-200 block">Partial Take Profit</strong>
-            <span className="text-[10px] text-zinc-500 block">Close 50% of volume at 1.5R target</span>
-          </div>
-          <input
-            type="checkbox"
-            checked={!!settings?.partial_enabled}
-            onChange={() => handleToggle('partial_enabled')}
-            className="w-5 h-5 accent-amber-600 rounded cursor-pointer"
           />
         </div>
       </div>
