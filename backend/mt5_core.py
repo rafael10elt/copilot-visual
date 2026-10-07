@@ -1,10 +1,9 @@
-# mt5_core.py — Motor de Conexão, Resolução Dinâmica de Ativos e Detecção SMC/Visão Computacional
+# mt5_core.py — Motor de Conexão, Sessões, Detecção de FVG, Liquidity Sweeps e 50% CE
 import MetaTrader5 as mt5
 import pandas as pd
 import numpy as np
 from datetime import datetime
 
-# Fallback gracioso para OpenCV se não estiver instalado no sistema
 try:
     import cv2
     HAS_OPENCV = True
@@ -17,7 +16,6 @@ class MT5Engine:
         self.symbol_cache = {}
 
     def start(self):
-        """Inicializa a conexão com o terminal MetaTrader 5."""
         print("[MT5] Conectando ao terminal MetaTrader 5...")
         if not mt5.initialize():
             print(f"❌ [ERRO] Falha ao inicializar MT5. Código: {mt5.last_error()}")
@@ -27,21 +25,16 @@ class MT5Engine:
         account = mt5.account_info()
         acc_id = account.login if account else "Desconhecido"
         server = account.server if account else "Desconhecido"
-        print(f"✅ [MT5] Conectado com sucesso! Conta: {acc_id} | Servidor: {server} | Build: {mt5.version()[0]}")
+        print(f"✅ [MT5] Conectado! Conta: {acc_id} | Servidor: {server} | Build: {mt5.version()[0]}")
         return True
 
     def stop(self):
-        """Finaliza a conexão."""
         if self.connected:
             mt5.shutdown()
             self.connected = False
             print("[MT5] Conexão encerrada.")
 
     def resolve_symbol(self, category):
-        """
-        Descobre automaticamente o ticker exato da sua corretora para NASDAQ ou OURO.
-        category: 'NASDAQ' ou 'GOLD'
-        """
         if category in self.symbol_cache:
             return self.symbol_cache[category]
 
@@ -61,29 +54,23 @@ class MT5Engine:
         else:
             targets = [category]
 
-        # 1. Correspondência exata
         for target in targets:
             for symbol_name in available_names:
                 if target.lower() == symbol_name.lower():
                     mt5.symbol_select(symbol_name, True)
                     self.symbol_cache[category] = symbol_name
-                    print(f"🎯 [ATIVO MAPEADO] {category} -> {symbol_name}")
                     return symbol_name
 
-        # 2. Correspondência parcial (fallback de segurança)
         for target in targets:
             for symbol_name in available_names:
                 if target.lower() in symbol_name.lower():
                     mt5.symbol_select(symbol_name, True)
                     self.symbol_cache[category] = symbol_name
-                    print(f"🎯 [ATIVO MAPEADO PARCIAL] {category} -> {symbol_name}")
                     return symbol_name
 
-        print(f"⚠️ [ERRO] Não foi possível encontrar nenhum ticker para a categoria {category}")
         return None
 
     def get_candles(self, symbol, timeframe, num_candles):
-        """Puxa candles OHLCV em DataFrame estruturado."""
         if not self.connected or not symbol:
             return None
 
@@ -98,8 +85,95 @@ class MT5Engine:
         return df
 
 
+class InstitutionalSessionFilter:
+    @staticmethod
+    def is_session_active(symbol, candle_time):
+        hour = candle_time.hour
+        is_nasdaq = "US100" in symbol.upper() or "NAS" in symbol.upper() or "USTEC" in symbol.upper()
+
+        if is_nasdaq:
+            return 15 <= hour <= 21
+        else:
+            return 9 <= hour <= 21
+
+
+class LiquiditySweepDetector:
+    """
+    Verifica se o FVG se formou IMEDIATAMENTE após uma varredura de liquidez (Sweep).
+    Alta probabilidade: captura de fundo anterior antes da compra ou topo antes da venda.
+    """
+    @staticmethod
+    def check_sweep(df, fvg_idx, direction, lookback=8):
+        if df is None or fvg_idx < lookback:
+            return False, "Histórico insuficiente"
+
+        window = df.iloc[max(0, fvg_idx - lookback) : fvg_idx]
+        displacement_candle = df.iloc[fvg_idx]
+
+        if direction == "BUY":
+            # Procura se alguma vela recente varreu a mínima da janela e rejeitou com pavio
+            prior_low = window['low'].min()
+            swept = displacement_candle['low'] <= prior_low and displacement_candle['close'] > displacement_candle['open']
+            return swept, "SSL_SWEEP" if swept else "NO_SWEEP"
+        else:
+            # Procura se varreu a máxima da janela e fechou caindo
+            prior_high = window['high'].max()
+            swept = displacement_candle['high'] >= prior_high and displacement_candle['close'] < displacement_candle['open']
+            return swept, "BSL_SWEEP" if swept else "NO_SWEEP"
+
+
+class VisionLiquidityAnalyzer:
+    def __init__(self, resolution=(128, 128)):
+        self.res = resolution
+
+    def validate_liquidity_path(self, df, direction, entry_price, tp_price):
+        if df is None or len(df) < 20:
+            return True, "Candles insuficientes para matriz de visão"
+
+        grid = np.zeros(self.res, dtype=np.float32)
+        min_p = float(df['low'].min())
+        max_p = float(df['high'].max())
+        p_range = max_p - min_p if max_p != min_p else 1.0
+
+        n_bars = min(len(df), self.res[0])
+        sub_df = df.iloc[-n_bars:]
+
+        for col_idx, (_, row) in enumerate(sub_df.iterrows()):
+            y_high = int((1.0 - (row['high'] - min_p) / p_range) * (self.res[1] - 1))
+            y_low = int((1.0 - (row['low'] - min_p) / p_range) * (self.res[1] - 1))
+            y_open = int((1.0 - (row['open'] - min_p) / p_range) * (self.res[1] - 1))
+            y_close = int((1.0 - (row['close'] - min_p) / p_range) * (self.res[1] - 1))
+
+            y_min_w = min(y_high, y_low)
+            y_max_w = max(y_high, y_low)
+            grid[y_min_w : y_max_w + 1, col_idx] += 0.5
+
+            y_top = min(y_open, y_close)
+            y_bot = max(y_open, y_close)
+            grid[y_top : y_bot + 1, col_idx] += 1.0
+
+        if HAS_OPENCV:
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+            grid = cv2.dilate(grid, kernel, iterations=1)
+
+        y_entry = int((1.0 - (entry_price - min_p) / p_range) * (self.res[1] - 1))
+        y_tp = int((1.0 - (tp_price - min_p) / p_range) * (self.res[1] - 1))
+
+        y_entry = max(0, min(self.res[1] - 1, y_entry))
+        y_tp = max(0, min(self.res[1] - 1, y_tp))
+
+        y_start, y_end = min(y_entry, y_tp), max(y_entry, y_tp)
+        path_zone = grid[y_start:y_end, :]
+
+        density = np.sum(path_zone >= 1.0) / (path_zone.size + 1e-5)
+
+        if density > 0.45:
+            return False, f"Parede de absorção detectada por visão (Densidade: {density:.1%})"
+
+        return True, "Caminho livre até o alvo"
+
+
 class MarketStructureDetector:
-    """Análise Institucional de Estrutura de Mercado M15 (BOS / MSS)."""
     @staticmethod
     def get_m15_structure(df):
         if df is None or len(df) < 15:
@@ -134,74 +208,12 @@ class MarketStructureDetector:
         return "NEUTRAL", last_high, last_low
 
 
-class VisionLiquidityAnalyzer:
-    """
-    Módulo de Visão Computacional Matricial usando NumPy puro (e OpenCV se disponível).
-    Renderiza um grid 2D dos preços/volumes para detectar piscinas de liquidez (BSL/SSL).
-    """
-    def __init__(self, resolution=(128, 128)):
-        self.res = resolution
-
-    def analyze_chart_matrix(self, df):
-        if df is None or len(df) < 20:
-            return {"clear_path": True, "bsl_score": 0.0, "ssl_score": 0.0}
-
-        grid = np.zeros(self.res, dtype=np.float32)
-        min_p = float(df['low'].min())
-        max_p = float(df['high'].max())
-        p_range = max_p - min_p if max_p != min_p else 1.0
-
-        n_bars = min(len(df), self.res[0])
-        sub_df = df.iloc[-n_bars:]
-
-        # Desenha sombras e corpos na matriz de pixels
-        for col_idx, (_, row) in enumerate(sub_df.iterrows()):
-            y_high = int((1.0 - (row['high'] - min_p) / p_range) * (self.res[1] - 1))
-            y_low = int((1.0 - (row['low'] - min_p) / p_range) * (self.res[1] - 1))
-            y_open = int((1.0 - (row['open'] - min_p) / p_range) * (self.res[1] - 1))
-            y_close = int((1.0 - (row['close'] - min_p) / p_range) * (self.res[1] - 1))
-
-            # Sombras (linhas finas com peso 0.5)
-            y_min_w = min(y_high, y_low)
-            y_max_w = max(y_high, y_low)
-            grid[y_min_w : y_max_w + 1, col_idx] += 0.5
-
-            # Corpos (peso 1.0)
-            y_top = min(y_open, y_close)
-            y_bot = max(y_open, y_close)
-            grid[y_top : y_bot + 1, col_idx] += 1.0
-
-        current_close = float(df.iloc[-1]['close'])
-        y_curr = int((1.0 - (current_close - min_p) / p_range) * (self.res[1] - 1))
-        y_curr = max(0, min(self.res[1] - 1, y_curr))
-
-        # Se tiver OpenCV instalado, aplica filtro de dilatação morfológica
-        if HAS_OPENCV:
-            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-            grid = cv2.dilate(grid, kernel, iterations=1)
-
-        # Piscinas de Liquidez: Acima do preço (BSL) vs Abaixo do preço (SSL)
-        upper_zone = grid[0:y_curr, :]
-        lower_zone = grid[y_curr:, :]
-
-        bsl_score = float(np.sum(upper_zone >= 0.5))
-        ssl_score = float(np.sum(lower_zone >= 0.5))
-
-        return {
-            "clear_path": True,
-            "bsl_score": bsl_score,
-            "ssl_score": ssl_score,
-            "current_y_pixel": y_curr
-        }
-
-
 class FVGDetector:
     def __init__(self, min_gap_nasdaq=3.0, min_gap_xau=0.4):
         self.min_gap_nasdaq = min_gap_nasdaq
         self.min_gap_xau = min_gap_xau
 
     def find_unmitigated_fvgs(self, df, symbol):
-        """Localiza desequilíbrios de valor justo (FVG) não mitigados."""
         if df is None or len(df) < 5:
             return []
 
@@ -219,7 +231,6 @@ class FVGDetector:
             fvg_bottom = 0.0
             gap_size = 0.0
 
-            # Bullish FVG
             if candle3['low'] > candle1['high']:
                 gap_size = candle3['low'] - candle1['high']
                 if gap_size >= min_gap:
@@ -227,7 +238,6 @@ class FVGDetector:
                     fvg_top = candle3['low']
                     fvg_bottom = candle1['high']
 
-            # Bearish FVG
             elif candle3['high'] < candle1['low']:
                 gap_size = candle1['low'] - candle3['high']
                 if gap_size >= min_gap:
@@ -248,12 +258,24 @@ class FVGDetector:
                         break
                 
                 if not mitigated:
+                    # Consequent Encroachment (ponto central exato de 50%)
+                    ce_50 = round(float((fvg_top + fvg_bottom) / 2.0), 2)
+
+                    # Verifica varredura prévia no momento do deslocamento
+                    has_sweep, sweep_type = LiquiditySweepDetector.check_sweep(
+                        df, fvg_idx=i+1, direction="BUY" if fvg_type == 'BULLISH' else "SELL"
+                    )
+
                     fvgs.append({
                         'type': fvg_type,
                         'top': round(float(fvg_top), 2),
                         'bottom': round(float(fvg_bottom), 2),
+                        'ce_50': ce_50,
+                        'has_sweep': has_sweep,
+                        'sweep_type': sweep_type,
                         'size': round(float(gap_size), 2),
                         'time_formed': candle2['time'].strftime('%H:%M'),
+                        'raw_time': candle2['time'],
                         'age_candles': len(df) - (i+2)
                     })
 

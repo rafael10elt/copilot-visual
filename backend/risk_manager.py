@@ -1,37 +1,41 @@
-# risk_manager.py — Gestão de Risco Especializada para Mesa Proprietária (Prop Firm Shield)
+# risk_manager.py — Gestão de Risco com Consequent Encroachment (50% CE) e Reset Diário
 import MetaTrader5 as mt5
 import pandas as pd
 import math
+from datetime import datetime
 
 class RiskManager:
     def __init__(self, risk_per_trade_usd=100.0, max_daily_loss_usd=400.0):
         self.risk_per_trade_usd = risk_per_trade_usd
         self.max_daily_loss_usd = max_daily_loss_usd
         
-        # Monitoramento Institucional de Drawdown Diário (High-Water Mark)
         self.start_day_balance = None
         self.peak_day_equity = None
         self.daily_lock_active = False
+        self.current_day_str = None
 
-    def update_account_state(self, current_balance, current_equity):
-        """Atualiza os picos do dia para proteger trailing drawdown de mesa proprietária."""
-        if self.start_day_balance is None or self.start_day_balance == 0:
+    def update_account_state(self, current_balance, current_equity, broker_time=None):
+        now = broker_time or datetime.now()
+        today_str = now.strftime('%Y-%m-%d')
+
+        if self.current_day_str != today_str:
+            self.current_day_str = today_str
             self.start_day_balance = current_balance
             self.peak_day_equity = current_equity
+            self.daily_lock_active = False
+            print(f"🔄 [PROP FIRM SHIELD] Novo dia iniciado ({today_str}). Saldo base: ${current_balance:.2f}")
 
         if current_equity > (self.peak_day_equity or 0.0):
             self.peak_day_equity = current_equity
 
-        # Drawdown em relação ao início do dia
         drawdown_from_start = self.start_day_balance - current_equity
         if drawdown_from_start >= self.max_daily_loss_usd:
             self.daily_lock_active = True
-            return True, f"DRAWDOWN_LIMIT_REACHED: Perdendo ${drawdown_from_start:.2f} (Limite: ${self.max_daily_loss_usd:.2f})"
+            return True, f"DRAWDOWN_LIMIT_REACHED: Perdendo ${drawdown_from_start:.2f} (Teto: ${self.max_daily_loss_usd:.2f})"
         
         return False, "OK"
 
     def calculate_atr(self, df, period=14):
-        """Calcula a volatilidade ATR com segurança."""
         if df is None or len(df) < period + 1:
             return 1.0
         
@@ -45,9 +49,10 @@ class RiskManager:
         
         return round(float(atr), 2)
 
-    def get_trade_parameters(self, profile, fvg, atr, symbol, direction):
+    def get_trade_parameters(self, profile, fvg, atr, symbol, direction, use_ce_50=True):
         """
-        Calcula os parâmetros de entrada com teto dinâmico de risco e limites de corretora.
+        Calcula entrada, SL e TP. 
+        Se use_ce_50 for True, entra no meio do gap (50%), reduzindo o SL e melhorando o R:R.
         """
         is_nasdaq = "US100" in symbol.upper() or "NAS" in symbol.upper() or "USTEC" in symbol.upper()
         buffer = 1.0 if is_nasdaq else 0.30
@@ -55,52 +60,38 @@ class RiskManager:
 
         fvg_top = float(fvg['top'])
         fvg_bottom = float(fvg['bottom'])
-
-        raw_risk = abs(fvg_top - fvg_bottom) + buffer
-        capped_risk = min(raw_risk, max_allowed_risk)
+        ce_price = float(fvg.get('ce_50', (fvg_top + fvg_bottom) / 2.0))
 
         if direction == 'BUY':
-            entry_price = fvg_top
-            if profile == 'sniper':
-                risk = capped_risk
-                tp_price = entry_price + (risk * 4.0)
-            elif profile == 'tatico':
-                risk = min(capped_risk + (atr * 0.4), max_allowed_risk)
-                tp_price = entry_price + (risk * 2.5)
-            else: # guardiao
-                risk = min(capped_risk + (atr * 0.8), max_allowed_risk)
-                tp_price = entry_price + (risk * 1.5)
+            entry_price = ce_price if use_ce_50 else fvg_top
+            raw_risk = (entry_price - fvg_bottom) + buffer
+            risk = min(max(raw_risk, 1.5 if is_nasdaq else 0.4), max_allowed_risk)
+
+            if profile == 'sniper': tp_price = entry_price + (risk * 4.0)
+            elif profile == 'tatico': tp_price = entry_price + (risk * 2.5)
+            else: tp_price = entry_price + (risk * 1.5)
             sl_price = entry_price - risk
 
         else: # SELL
-            entry_price = fvg_bottom
-            if profile == 'sniper':
-                risk = capped_risk
-                tp_price = entry_price - (risk * 4.0)
-            elif profile == 'tatico':
-                risk = min(capped_risk + (atr * 0.4), max_allowed_risk)
-                tp_price = entry_price - (risk * 2.5)
-            else: # guardiao
-                risk = min(capped_risk + (atr * 0.8), max_allowed_risk)
-                tp_price = entry_price - (risk * 1.5)
+            entry_price = ce_price if use_ce_50 else fvg_bottom
+            raw_risk = (fvg_top - entry_price) + buffer
+            risk = min(max(raw_risk, 1.5 if is_nasdaq else 0.4), max_allowed_risk)
+
+            if profile == 'sniper': tp_price = entry_price - (risk * 4.0)
+            elif profile == 'tatico': tp_price = entry_price - (risk * 2.5)
+            else: tp_price = entry_price - (risk * 1.5)
             sl_price = entry_price + risk
 
-        # Arredondamento conforme o ativo
-        decimals = 2 if is_nasdaq else 2
         return {
-            "entry": round(entry_price, decimals),
-            "sl": round(sl_price, decimals),
-            "tp": round(tp_price, decimals),
-            "risk_points": round(risk, decimals)
+            "entry": round(entry_price, 2),
+            "sl": round(sl_price, 2),
+            "tp": round(tp_price, 2),
+            "risk_points": round(risk, 2)
         }
 
     def calculate_lot_size(self, symbol, risk_points):
-        """
-        Calcula o volume exato respeitando o Tick Value, Tick Size e Steps da Corretora.
-        """
         info = mt5.symbol_info(symbol)
-        if not info:
-            return 0.01
+        if not info: return 0.01
 
         tick_size = info.trade_tick_size or 0.01
         tick_value = info.trade_tick_value or 1.0
@@ -108,7 +99,6 @@ class RiskManager:
         if risk_points <= 0 or tick_size <= 0 or tick_value <= 0:
             return info.volume_min
 
-        # Valor financeiro do risco de 1 lote inteiro
         ticks_at_risk = risk_points / tick_size
         risk_per_full_lot = ticks_at_risk * tick_value
 
@@ -116,49 +106,35 @@ class RiskManager:
             return info.volume_min
 
         raw_lot = self.risk_per_trade_usd / risk_per_full_lot
-
-        # Ajuste ao passo da corretora (step)
         step = info.volume_step or 0.01
         lot_size = math.floor(raw_lot / step) * step
 
-        # Garantir limites da conta
         lot_size = max(lot_size, info.volume_min)
         lot_size = min(lot_size, info.volume_max)
 
         return round(lot_size, 2)
 
     def calculate_safe_breakeven_sl(self, symbol, position_type, open_price, current_price):
-        """
-        Calcula o Stop Loss do Break-even respeitando rigorosamente o StopsLevel e Spread da corretora.
-        Previne o erro 10016 (TRADE_RETCODE_INVALID_STOPS).
-        """
         info = mt5.symbol_info(symbol)
-        if not info:
-            return None
+        if not info: return None
 
         point = info.point
         stops_level = info.trade_stops_level * point
         spread = info.spread * point
-
-        # Distância mínima necessária de segurança
         min_offset = max(stops_level, spread, 2 * point)
 
         if position_type == mt5.POSITION_TYPE_BUY:
-            # Só move se o preço atual já estiver seguro acima do ponto de entrada
             if (current_price - open_price) <= (min_offset + spread):
                 return None
             proposed_sl = open_price + min_offset
-            # Não pode ficar acima do bid atual
             if proposed_sl >= info.bid - stops_level:
                 return None
             return round(proposed_sl, info.digits)
 
         elif position_type == mt5.POSITION_TYPE_SELL:
-            # Só move se o preço atual já estiver seguro abaixo do ponto de entrada
             if (open_price - current_price) <= (min_offset + spread):
                 return None
             proposed_sl = open_price - min_offset
-            # Não pode ficar abaixo do ask atual
             if proposed_sl <= info.ask + stops_level:
                 return None
             return round(proposed_sl, info.digits)

@@ -1,4 +1,4 @@
-# ai_groq.py — Agente de Regime Macro Institucional com Autodescoberta de Modelos Ativos
+# ai_groq.py — Agente de Regime Macro Institucional (Filtro Estrito de Modelos de Chat)
 import os
 import json
 import time
@@ -14,34 +14,43 @@ class LumiGroqAgent:
         self.client = Groq(api_key=api_key) if self.enabled else None
         self.model = self.detect_best_active_model() if self.enabled else None
         
-        # Cache de Viés Macro (Atualizado em background sem travar scalping)
         self.macro_cache = {
             "NASDAQ": {"bias": "NEUTRAL", "allowed_profiles": ["tatico", "guardiao"], "updated_at": 0},
             "GOLD": {"bias": "NEUTRAL", "allowed_profiles": ["tatico", "guardiao"], "updated_at": 0}
         }
 
     def detect_best_active_model(self):
-        """Descobre dinamicamente na API da Groq quais modelos estão liberados na sua conta."""
+        """Descobre modelos de chat reais, ignorando modelos de classificação/guarda."""
         candidatos_preferidos = [
+            "llama-3.3-70b-versatile",
             "llama-3.1-8b-instant",
+            "openai/gpt-oss-120b",
+            "openai/gpt-oss-20b",
             "llama3-70b-8192",
             "llama3-8b-8192",
             "mixtral-8x7b-32768",
             "gemma2-9b-it"
         ]
 
+        termos_bloqueados = ["guard", "whisper", "orpheus", "embedding", "audio", "classification"]
+
         try:
             lista = self.client.models.list()
-            ativos = [m.id for m in lista.data]
+            # Filtra apenas modelos que são de texto/chat real
+            ativos = [
+                m.id for m in lista.data 
+                if not any(b in m.id.lower() for b in termos_bloqueados)
+            ]
             
+            # 1. Tenta correspondência com a lista de preferidos
             for cand in candidatos_preferidos:
                 if cand in ativos:
-                    print(f"✅ [IA GROQ] Modelo autoselecionado com sucesso: {cand}")
+                    print(f"✅ [IA GROQ] Modelo de chat ativo selecionado: {cand}")
                     return cand
 
-            # Se nenhum dos preferidos estiver, seleciona o primeiro disponível
+            # 2. Se não estiver nos preferidos, pega o primeiro modelo de chat válido
             if len(ativos) > 0:
-                print(f"ℹ️ [IA GROQ] Usando modelo ativo disponível: {ativos[0]}")
+                print(f"ℹ️ [IA GROQ] Usando modelo de chat disponível: {ativos[0]}")
                 return ativos[0]
 
         except Exception as e:
@@ -50,19 +59,13 @@ class LumiGroqAgent:
         return "llama-3.1-8b-instant"
 
     def update_macro_regime_async(self, symbol_key, m15_structure, atr, spreads):
-        """
-        Atualiza o viés macroeconômico em segundo plano.
-        Travado a cada 10 minutos (mesmo se der erro, NÃO entra em loop).
-        """
         if not self.enabled or not self.client or not self.model:
             return
 
         now = time.time()
-        # Trava rigorosa: se já tentou nos últimos 600 segundos (10 min), aguarda
         if now - self.macro_cache.get(symbol_key, {}).get("updated_at", 0) < 600:
             return
 
-        # IMPORTANTE: Atualiza o timestamp IMEDIATAMENTE para matar o loop se der erro
         self.macro_cache[symbol_key]["updated_at"] = now
 
         prompt = f"""
@@ -93,17 +96,12 @@ class LumiGroqAgent:
             data = json.loads(response.choices[0].message.content)
             self.macro_cache[symbol_key]["bias"] = data.get("bias", "NEUTRAL")
             self.macro_cache[symbol_key]["allowed_profiles"] = data.get("allowed_profiles", ["tatico"])
-            print(f"🧠 [IA GROQ MACRO] {symbol_key} calibrado: Viés {data.get('bias')} | Perfis: {data.get('allowed_profiles')}")
+            print(f"🧠 [IA GROQ MACRO] {symbol_key} calibrado via {self.model}: Viés {data.get('bias')} | Perfis: {data.get('allowed_profiles')}")
 
         except Exception as e:
-            # Em caso de falha de cota ou rede, mantém a heurística local sem flood no terminal
-            print(f"⚠️ [IA GROQ] Erro na consulta ({e}). Heurística SMC local assumiu o ativo {symbol_key}.")
+            print(f"⚠️ [IA GROQ] Falha na consulta ({e}). Heurística SMC local mantida no ativo {symbol_key}.")
 
     def quick_validate_trade(self, symbol_key, direction, current_profile):
-        """
-        Validação instantânea em memória (< 1 ms).
-        Zero latência no momento de enviar a ordem.
-        """
         cached = self.macro_cache.get(symbol_key)
         if not cached or cached["bias"] == "NEUTRAL":
             return True, "Liberado por SMC / Heurística Local"
