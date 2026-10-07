@@ -1,4 +1,4 @@
-# main.py — Orquestrador HFT com Execução de Ordens Blindada e Controle Híbrido Independente
+# main.py — Orquestrador HFT com Execução de Ordens Blindada, BE 1.2R Real e Defesa Ativa FTMO
 import time
 import json
 import requests
@@ -184,7 +184,11 @@ def close_all_open_positions():
     return closed
 
 
+# Cache global para preservar o risco original de cada operação mesmo após o SL ser movido para o Break-Even
+POSITION_RISK_CACHE = {}
+
 def manage_open_trades(engine, risk_manager, settings):
+    global POSITION_RISK_CACHE
     be_enabled = settings.get("breakeven_enabled", True)
     trailing_enabled = settings.get("trailing_enabled", False)
 
@@ -193,7 +197,12 @@ def manage_open_trades(engine, risk_manager, settings):
 
     positions = mt5.positions_get()
     if not positions:
+        POSITION_RISK_CACHE.clear()
         return
+
+    # Limpa do cache tickets que já foram fechados
+    current_tickets = {p.ticket for p in positions}
+    POSITION_RISK_CACHE = {t: r for t, r in POSITION_RISK_CACHE.items() if t in current_tickets}
 
     for p in positions:
         if p.magic != ROBOT_MAGIC:
@@ -203,14 +212,25 @@ def manage_open_trades(engine, risk_manager, settings):
         open_price = p.price_open
         current_sl = p.sl
 
-        # 1. Trailing Stop M1
-        if trailing_enabled:
+        # Registra e congela o risco original do trade antes de qualquer alteração de SL
+        if p.ticket not in POSITION_RISK_CACHE:
+            if current_sl > 0:
+                raw_risk = abs(open_price - current_sl)
+                # Só registra se for uma distância coerente de stop (evita registrar o próprio BE)
+                if raw_risk > (open_price * 0.0002):
+                    POSITION_RISK_CACHE[p.ticket] = raw_risk
+
+        initial_risk = POSITION_RISK_CACHE.get(p.ticket, abs(open_price - current_sl) if current_sl > 0 else 0.0)
+
+        # 1. Trailing Stop M1 (Disparado apenas a partir de 1.5R do risco REAL)
+        if trailing_enabled and initial_risk > 0:
             df_m1 = engine.get_candles(p.symbol, mt5.TIMEFRAME_M1, 3)
             if df_m1 is not None and len(df_m1) >= 2:
                 last_completed = df_m1.iloc[-2]
                 new_trail_sl = risk_manager.calculate_safe_trailing_sl(
                     p.symbol, p.type, open_price, current_price, current_sl,
-                    float(last_completed['low']), float(last_completed['high'])
+                    float(last_completed['low']), float(last_completed['high']),
+                    initial_risk_points=initial_risk, r_trigger=1.5
                 )
                 if new_trail_sl:
                     req = {
@@ -221,15 +241,17 @@ def manage_open_trades(engine, risk_manager, settings):
                     }
                     res = mt5.order_send(req)
                     if res.retcode == mt5.TRADE_RETCODE_DONE:
-                        print(f"📈 [TRAILING M1] #{p.ticket} ({p.symbol}) SL ajustado para {new_trail_sl}")
+                        print(f"📈 [TRAILING 1.5R M1] #{p.ticket} ({p.symbol}) SL ajustado para {new_trail_sl}")
                     continue
 
-        # 2. Break-Even
-        if be_enabled:
+        # 2. Break-Even com validação estrita de 1.2R
+        if be_enabled and initial_risk > 0:
             if p.type == mt5.POSITION_TYPE_BUY and current_sl >= open_price: continue
             if p.type == mt5.POSITION_TYPE_SELL and current_sl > 0 and current_sl <= open_price: continue
 
-            new_be_sl = risk_manager.calculate_safe_breakeven_sl(p.symbol, p.type, open_price, current_price)
+            new_be_sl = risk_manager.calculate_safe_breakeven_sl(
+                p.symbol, p.type, open_price, current_price, initial_risk, r_trigger=1.2
+            )
             if new_be_sl:
                 req = {
                     "action": mt5.TRADE_ACTION_SLTP,
@@ -239,8 +261,7 @@ def manage_open_trades(engine, risk_manager, settings):
                 }
                 res = mt5.order_send(req)
                 if res.retcode == mt5.TRADE_RETCODE_DONE:
-                    print(f"🛡️ [BREAK-EVEN] #{p.ticket} ({p.symbol}) SL protegido em {new_be_sl}")
-
+                    print(f"🛡️ [BREAK-EVEN 1.2R] #{p.ticket} ({p.symbol}) SL protegido em {new_be_sl}")
 
 def get_performance_stats(risk_base=50.0):
     try:
@@ -633,7 +654,7 @@ def main():
     active_mode = "BOTH"
     cached_settings = {}
 
-    sync.add_log(None, "Motor conectado com Controle Híbrido Independente e Escudo Persistido.", "INFO")
+    sync.add_log(None, "Motor conectado com Escudo Ativo e Break-Even Institucional 1.2R.", "INFO")
 
     try:
         while True:
@@ -645,10 +666,12 @@ def main():
                 pnl_today = equity - balance
                 login, server = str(acc.login), acc.server
                 
+                # Defesa Ativa FTMO: Se violar o Soft Stop diário, liquida tudo imediatamente
                 breached, msg = risk_manager.update_account_state(balance, equity, broker_time)
                 if breached:
-                    sync.add_log(None, f"⛔ [PROP SHIELD] {msg} — Travando novas operações!", "DANGER")
+                    sync.add_log(None, f"⛔ [PROP SHIELD] {msg} — Liquidando posições e travando operações!", "DANGER")
                     cancel_all_pending_orders()
+                    close_all_open_positions()
                     time.sleep(10)
                     continue
             else:
@@ -736,6 +759,7 @@ def main():
 
             manage_open_trades(engine, risk_manager, cached_settings)
 
+            # Trava total se o escudo diário ou notícia de alto impacto estiverem ativos
             if is_news or risk_manager.daily_lock_active:
                 time.sleep(1)
                 continue

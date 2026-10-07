@@ -1,4 +1,4 @@
-# risk_manager.py — Gestão de Risco com Persistência em Disco, Blindagem FTMO e Trailing M1
+# risk_manager.py — Gestão de Risco com Persistência em Disco, Blindagem FTMO, BE 1.2R e Trailing 1.5R
 import MetaTrader5 as mt5
 import pandas as pd
 import math
@@ -130,7 +130,7 @@ class RiskManager:
         }
 
     def calculate_lot_size(self, symbol, risk_points):
-        """Cálculo de lote à prova de falhas para NASDAQ e GOLD, mesmo sem tick inicial sincronizado."""
+        """Cálculo de lote à prova de falhas para NASDAQ e GOLD, com fallbacks contratuais."""
         info = mt5.symbol_info(symbol)
         if not info:
             return 0.01
@@ -141,13 +141,11 @@ class RiskManager:
         tick_size = info.trade_tick_size or info.point or 0.01
         tick_value = info.trade_tick_value
 
-        # Fallback de segurança caso o MT5 retorne tick_value zerado (comum em abertura/reconexão)
+        # Fallback de segurança caso o MT5 retorne tick_value zerado
         if not tick_value or tick_value <= 0:
             if is_gold:
-                # 1 Lote padrão de ouro = 100 oz. Cada 0.01 de variação = $1.00 USD
                 tick_value = (info.trade_contract_size or 100.0) * tick_size
             elif is_nasdaq:
-                # Contrato típico de US100: 1 lote = 1 ou 10 ou 20 contratos
                 contract_size = info.trade_contract_size or 1.0
                 tick_value = contract_size * tick_size
             else:
@@ -166,7 +164,6 @@ class RiskManager:
         step = info.volume_step or 0.01
         lot_size = math.floor(raw_lot / step) * step
 
-        # Respeita limites contratuais da corretora/mesa
         min_vol = info.volume_min if info.volume_min and info.volume_min > 0 else 0.01
         max_vol = info.volume_max if info.volume_max and info.volume_max > 0 else 50.0
 
@@ -175,42 +172,57 @@ class RiskManager:
 
         return round(lot_size, 2)
 
-    def calculate_safe_breakeven_sl(self, symbol, position_type, open_price, current_price):
+    def calculate_safe_breakeven_sl(self, symbol, position_type, open_price, current_price, initial_risk_points, r_trigger=1.2):
+        """
+        Garante que o Break-Even só é ativado se o trade tiver atingido r_trigger * Risco Inicial (Padrão 1.2R).
+        """
         info = mt5.symbol_info(symbol)
-        if not info: return None
+        if not info or initial_risk_points <= 0:
+            return None
 
         point = info.point
         stops_level = (info.trade_stops_level or 0) * point
         spread = (info.spread or 10) * point
         min_offset = max(stops_level, spread, 2 * point)
+        min_profit_required = initial_risk_points * r_trigger
 
         if position_type == mt5.POSITION_TYPE_BUY:
-            if (current_price - open_price) <= (min_offset + spread):
+            # Trava matemática: precisa ter andado 1.2R a favor
+            if (current_price - open_price) < min_profit_required:
                 return None
             proposed_sl = open_price + min_offset
-            if proposed_sl >= info.bid - stops_level:
+            if proposed_sl >= (info.bid - stops_level):
                 return None
             return round(proposed_sl, info.digits)
 
         elif position_type == mt5.POSITION_TYPE_SELL:
-            if (open_price - current_price) <= (min_offset + spread):
+            # Trava matemática: precisa ter andado 1.2R a favor
+            if (open_price - current_price) < min_profit_required:
                 return None
             proposed_sl = open_price - min_offset
-            if proposed_sl <= info.ask + stops_level:
+            if proposed_sl <= (info.ask + stops_level):
                 return None
             return round(proposed_sl, info.digits)
 
         return None
 
-    def calculate_safe_trailing_sl(self, symbol, position_type, open_price, current_price, current_sl, last_m1_low, last_m1_high):
+    def calculate_safe_trailing_sl(self, symbol, position_type, open_price, current_price, current_sl, last_m1_low, last_m1_high, initial_risk_points=0.0, r_trigger=1.5):
+        """
+        Rastreia vela a vela M1 apenas após o trade avançar no mínimo 1.5R, sem violar stops_level.
+        """
         info = mt5.symbol_info(symbol)
-        if not info: return None
+        if not info:
+            return None
 
         point = info.point
         stops_level = (info.trade_stops_level or 0) * point
         buffer = 3 * point
 
+        min_profit_required = (initial_risk_points * r_trigger) if initial_risk_points > 0 else 0.0
+
         if position_type == mt5.POSITION_TYPE_BUY:
+            if (current_price - open_price) < min_profit_required:
+                return None
             proposed_sl = last_m1_low - buffer
             if proposed_sl <= current_sl or proposed_sl <= open_price:
                 return None
@@ -219,6 +231,8 @@ class RiskManager:
             return round(proposed_sl, info.digits)
 
         elif position_type == mt5.POSITION_TYPE_SELL:
+            if (open_price - current_price) < min_profit_required:
+                return None
             proposed_sl = last_m1_high + buffer
             if current_sl > 0 and proposed_sl >= current_sl:
                 return None
