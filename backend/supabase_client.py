@@ -20,10 +20,10 @@ class SupabaseSync:
                 print(f"⚠️ [SUPABASE] Erro ao conectar: {e}")
                 self.enabled = False
 
-    def send_heartbeat(self, profile, pnl=0.0, login="--", balance=0.0, equity=0.0, server="--"):
+    def send_heartbeat(self, profile, pnl=0.0, login="--", balance=0.0, equity=0.0, server="--", today_stats=None):
         if not self.enabled: return
         try:
-            self.client.table("copilot_status").update({
+            payload = {
                 "is_online": True,
                 "current_profile": profile,
                 "pnl_today": round(pnl, 2),
@@ -32,10 +32,14 @@ class SupabaseSync:
                 "account_equity": round(equity, 2),
                 "broker": str(server),
                 "last_seen": datetime.now(timezone.utc).isoformat()
-            }).eq("id", 1).execute()
+            }
+            if today_stats:
+                payload["today_stats"] = today_stats
+
+            self.client.table("copilot_status").update(payload).eq("id", 1).execute()
         except Exception as e:
             print(f"Erro heartbeat: {e}")
-
+            
     def add_log(self, symbol, message, level="INFO"):
         print(f"[{level}] {symbol or 'SISTEMA'}: {message}")
         if not self.enabled: return

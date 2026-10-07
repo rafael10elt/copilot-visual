@@ -1,5 +1,6 @@
 import time
 import json
+from datetime import datetime
 import MetaTrader5 as mt5
 from mt5_core import MT5Engine, FVGDetector
 from risk_manager import RiskManager
@@ -102,10 +103,72 @@ def manage_open_trades(settings):
                     req = {"action": mt5.TRADE_ACTION_SLTP, "position": p.ticket, "sl": float(entry_price - 0.1), "tp": p.tp}
                     mt5.order_send(req)
 
+def get_today_performance():
+    """Extrai os contadores reais de trades de hoje do MT5 (Posições Abertas + Fechadas)."""
+    now = datetime.now()
+    start_of_day = datetime(now.year, now.month, now.day, 0, 0, 0)
+    
+    # 1. Puxa histórico de negócios fechados hoje
+    deals = mt5.history_deals_get(start_of_day, datetime.now())
+    closed_trades = []
+    wins = 0
+    losses = 0
+    realized_pnl = 0.0
+
+    if deals:
+        for d in deals:
+            # DEAL_ENTRY_OUT indica que a posição foi encerrada
+            if d.entry == mt5.DEAL_ENTRY_OUT and (d.magic == ROBOT_MAGIC or d.magic == 0):
+                profit = round(d.profit + d.commission + d.swap, 2)
+                realized_pnl += profit
+                if profit > 0:
+                    wins += 1
+                elif profit < 0:
+                    losses += 1
+
+                trade_type = "SELL" if d.type == mt5.DEAL_TYPE_BUY else "BUY" # inversão do deal de saída
+                closed_trades.append({
+                    "ticket": d.ticket,
+                    "symbol": d.symbol,
+                    "type": trade_type,
+                    "volume": d.volume,
+                    "profit": profit,
+                    "time": datetime.fromtimestamp(d.time).strftime("%H:%M")
+                })
+
+    # 2. Puxa posições atualmente abertas no MT5
+    open_positions = []
+    positions = mt5.positions_get()
+    if positions:
+        for p in positions:
+            if p.magic == ROBOT_MAGIC or p.magic == 0:
+                open_positions.append({
+                    "ticket": p.ticket,
+                    "symbol": p.symbol,
+                    "type": "BUY" if p.type == mt5.POSITION_TYPE_BUY else "SELL",
+                    "volume": p.volume,
+                    "price_open": round(p.price_open, 2),
+                    "price_current": round(p.price_current, 2),
+                    "sl": round(p.sl, 2),
+                    "tp": round(p.tp, 2),
+                    "profit": round(p.profit + p.swap, 2)
+                })
+
+    total_trades = wins + losses
+    win_rate = int((wins / total_trades) * 100) if total_trades > 0 else 0
+
+    return {
+        "total_trades": total_trades,
+        "wins": wins,
+        "losses": losses,
+        "win_rate": win_rate,
+        "realized_pnl": round(realized_pnl, 2),
+        "open_count": len(open_positions),
+        "open_positions": open_positions,
+        "closed_trades": closed_trades[-8:] # últimos 8 trades fechados
+    }
+
 def run_recent_backtest(engine, symbol, days=2, risk_per_trade=50.0):
-    """
-    BACKTEST QUANTITATIVO ULTRA-REALISTA (Com Fricção de Spread, Concorrência Real e Teto de Stop)
-    """
     print(f"\n📊 [BACKTEST] Running institutional-grade M1 scan for {symbol} ({days}D)...")
 
     total_m5 = int(days) * 240
@@ -126,23 +189,17 @@ def run_recent_backtest(engine, symbol, days=2, risk_per_trade=50.0):
     m5_lows = df_m5['low'].values
     m5_times = df_m5['time'].values
 
-    # Parâmetros de Fricção e Tetos Institucionais
     is_nasdaq = "US100" in symbol
     min_gap = 4.0 if is_nasdaq else 0.5
-    max_allowed_risk = 25.0 if is_nasdaq else 3.5  # Teto de Stop Loss (Scalp puro)
-    spread_friction = 1.2 if is_nasdaq else 0.25   # Fricção real de Spread + Comissão FTMO
+    max_allowed_risk = 25.0 if is_nasdaq else 3.5
+    spread_friction = 1.2 if is_nasdaq else 0.25
 
     setups = 0
     sniper_wins, sniper_losses = 0, 0
     tatico_wins, tatico_losses = 0, 0
     guardiao_wins, guardiao_losses = 0, 0
 
-    # Ponteiro para simular ocupação de posição real (não empilha trades enquanto estiver posicionado)
-    in_trade_until_idx = {
-        'sniper': 0,
-        'tatico': 0,
-        'guardiao': 0
-    }
+    in_trade_until_idx = {'sniper': 0, 'tatico': 0, 'guardiao': 0}
 
     for i in range(len(df_m5) - 10):
         c1_high, c1_low = m5_highs[i], m5_lows[i]
@@ -152,23 +209,18 @@ def run_recent_backtest(engine, symbol, days=2, risk_per_trade=50.0):
         is_buy = c3_low > c1_high and (c3_low - c1_high) >= min_gap
         is_sell = c3_high < c1_low and (c1_low - c3_high) >= min_gap
 
-        if not (is_buy or is_sell):
-            continue
+        if not (is_buy or is_sell): continue
 
-        # Sincroniza o momento exato no M1
         m1_start_idx = 0
         for idx in range(len(m1_times) - 60):
             if m1_times[idx] >= fvg_time:
                 m1_start_idx = idx
                 break
 
-        if m1_start_idx == 0:
-            continue
+        if m1_start_idx == 0: continue
 
-        # Aplica o Teto Máximo de Stop Loss
         raw_risk = abs(c3_low - c1_high) if is_buy else abs(c1_low - c3_high)
-        if raw_risk > (max_allowed_risk * 1.5):
-            continue  # Descarta anomalias causadas por velas gigantes de notícia
+        if raw_risk > (max_allowed_risk * 1.5): continue
 
         capped_risk = min(raw_risk + spread_friction, max_allowed_risk)
         setups += 1
@@ -177,14 +229,10 @@ def run_recent_backtest(engine, symbol, days=2, risk_per_trade=50.0):
         sim_lows = m1_lows[m1_start_idx : min(m1_start_idx + 60, len(m1_lows))]
 
         for profile, mult in [('sniper', 4.0), ('tatico', 2.5), ('guardiao', 1.5)]:
-            # Se a simulação já estiver com um trade aberto neste perfil, pula (evita simultaneidade irreal)
-            if m1_start_idx < in_trade_until_idx[profile]:
-                continue
+            if m1_start_idx < in_trade_until_idx[profile]: continue
 
             entry = c3_low if is_buy else c3_high
             risk = capped_risk
-            
-            # Adiciona o spread no alvo e stop
             tp = entry + (risk * mult) if is_buy else entry - (risk * mult)
             sl = entry - risk if is_buy else entry + risk
 
@@ -194,21 +242,12 @@ def run_recent_backtest(engine, symbol, days=2, risk_per_trade=50.0):
             for h, l in zip(sim_highs, sim_lows):
                 bars_taken += 1
                 if is_buy:
-                    if l <= sl:
-                        loss = True
-                        break
-                    if h >= tp:
-                        win = True
-                        break
+                    if l <= sl: loss = True; break
+                    if h >= tp: win = True; break
                 else:
-                    if h >= sl:
-                        loss = True
-                        break
-                    if l <= tp:
-                        win = True
-                        break
+                    if h >= sl: loss = True; break
+                    if l <= tp: win = True; break
 
-            # Registra até quando o trade ficou aberto
             in_trade_until_idx[profile] = m1_start_idx + bars_taken
 
             if win:
@@ -220,10 +259,8 @@ def run_recent_backtest(engine, symbol, days=2, risk_per_trade=50.0):
                 elif profile == 'tatico': tatico_losses += 1
                 elif profile == 'guardiao': guardiao_losses += 1
 
-    if setups == 0:
-        setups = 1
+    if setups == 0: setups = 1
 
-    # Cálculos Quantitativos Finais
     total_trades_s = sniper_wins + sniper_losses or 1
     total_trades_t = tatico_wins + tatico_losses or 1
     total_trades_g = guardiao_wins + guardiao_losses or 1
@@ -240,12 +277,9 @@ def run_recent_backtest(engine, symbol, days=2, risk_per_trade=50.0):
     t_pnl = round(t_net_r * risk_per_trade, 2)
     g_pnl = round(g_net_r * risk_per_trade, 2)
 
-    if g_pnl >= max(s_pnl, t_pnl):
-        recommended = "GUARDIAN"
-    elif t_pnl >= s_pnl:
-        recommended = "TACTICAL"
-    else:
-        recommended = "SNIPER"
+    if g_pnl >= max(s_pnl, t_pnl): recommended = "GUARDIAN"
+    elif t_pnl >= s_pnl: recommended = "TACTICAL"
+    else: recommended = "SNIPER"
 
     report = {
         "timestamp": int(time.time()),
@@ -253,30 +287,11 @@ def run_recent_backtest(engine, symbol, days=2, risk_per_trade=50.0):
         "days": days,
         "setups": setups,
         "base_risk": risk_per_trade,
-        "sniper": {
-            "rate": s_rate,
-            "wins": sniper_wins,
-            "losses": sniper_losses,
-            "net_r": s_net_r,
-            "pnl": s_pnl
-        },
-        "tatico": {
-            "rate": t_rate,
-            "wins": tatico_wins,
-            "losses": tatico_losses,
-            "net_r": t_net_r,
-            "pnl": t_pnl
-        },
-        "guardiao": {
-            "rate": g_rate,
-            "wins": guardiao_wins,
-            "losses": guardiao_losses,
-            "net_r": g_net_r,
-            "pnl": g_pnl
-        },
+        "sniper": {"rate": s_rate, "wins": sniper_wins, "losses": sniper_losses, "net_r": s_net_r, "pnl": s_pnl},
+        "tatico": {"rate": t_rate, "wins": tatico_wins, "losses": tatico_losses, "net_r": t_net_r, "pnl": t_pnl},
+        "guardiao": {"rate": g_rate, "wins": guardiao_wins, "losses": guardiao_losses, "net_r": g_net_r, "pnl": g_pnl},
         "recommended": recommended
     }
-    print(f"✅ [REALISTIC BACKTEST] Trades simulados com atrito de spread e concorrência real finalizados.")
     return report
 
 def get_m15_trend(engine, symbol):
@@ -321,7 +336,7 @@ def main():
 
     try:
         while True:
-            # 1. Puxa métricas da FTMO
+            # 1. Puxa métricas da FTMO e dados dos trades reais
             acc = mt5.account_info()
             if acc:
                 balance, equity = acc.balance, acc.equity
@@ -330,11 +345,13 @@ def main():
             else:
                 balance, equity, pnl_today, login, server = 0, 0, 0, "--", "--"
 
-            # 2. Sincronização e Leitura de Comandos
+            today_stats = get_today_performance()
+
+            # 2. Sincronização a cada 2s
             agora = time.time()
             if agora - last_hb >= 2.0:
                 last_hb = agora
-                sync.send_heartbeat(current_profile, pnl_today, login, balance, equity, server)
+                sync.send_heartbeat(current_profile, pnl_today, login, balance, equity, server, today_stats)
 
                 remote = sync.check_remote_settings()
                 if remote:
@@ -350,7 +367,6 @@ def main():
                     if remote.get("active_symbol_mode"):
                         active_mode = remote.get("active_symbol_mode")
 
-                    # CANAL DIRETO DE COMANDO
                     cmd = remote.get("command")
                     if cmd:
                         print(f"📥 [DIRECT COMMAND RECEIVED] {cmd}")
@@ -368,11 +384,8 @@ def main():
                             if report:
                                 try:
                                     sync.client.table("copilot_status").update({"last_backtest": report}).eq("id", 1).execute()
-                                except Exception as e:
-                                    print(f"Erro ao salvar backtest: {e}")
+                                except: pass
                                 sync.add_log(target_sym, f"BACKTEST_RESULT:{json.dumps(report)}", "SUCCESS")
-                            else:
-                                sync.add_log(target_sym, "BACKTEST FAILED: Insufficient candles", "DANGER")
 
                         elif "EMERGENCY_STOP" in cmd:
                             c = cancel_all_pending_orders()

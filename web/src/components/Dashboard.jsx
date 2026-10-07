@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { UserCheck, Power, Sparkles, BarChart3, AlertTriangle, X, CheckCircle2, Trophy, ArrowRight, Loader2, DollarSign } from 'lucide-react';
+import { UserCheck, Power, Sparkles, BarChart3, AlertTriangle, X, CheckCircle2, Trophy, ArrowRight, Loader2, ArrowUpRight, ArrowDownRight, Activity, Clock } from 'lucide-react';
 
 export default function Dashboard({ 
   status, 
@@ -19,8 +19,17 @@ export default function Dashboard({
   const [selectedAsset, setSelectedAsset] = useState('US100');
   const [selectedDays, setSelectedDays] = useState(2);
 
-  // Valor base de risco para simular o PnL no modal ($)
   const currentRiskBase = Number(settings?.risk_per_trade || 50);
+  const stats = status?.today_stats || {
+    total_trades: 0,
+    wins: 0,
+    losses: 0,
+    win_rate: 0,
+    realized_pnl: 0,
+    open_count: 0,
+    open_positions: [],
+    closed_trades: []
+  };
 
   const handleBacktestClick = () => {
     onRunBacktest(selectedDays, selectedAsset);
@@ -34,7 +43,7 @@ export default function Dashboard({
 
   return (
     <div className="space-y-3.5 relative">
-      {/* CARD CONTA FTMO */}
+      {/* 1. CARD CONTA FTMO */}
       <div className="bg-zinc-900/90 border border-zinc-800 p-4 rounded-2xl flex items-center justify-between shadow-xl">
         <div className="flex items-center gap-3">
           <div className="p-2.5 rounded-xl bg-violet-500/10 border border-violet-500/20 text-violet-400">
@@ -54,7 +63,7 @@ export default function Dashboard({
         </div>
       </div>
 
-      {/* PLACAR PNL & SALDO */}
+      {/* 2. PLACAR PNL & SALDO */}
       <div className="grid grid-cols-2 gap-3">
         <div className="bg-zinc-900/90 border border-zinc-800 p-3.5 rounded-2xl shadow-lg">
           <span className="text-[10px] font-mono text-zinc-500 uppercase block">Account Balance</span>
@@ -64,14 +73,105 @@ export default function Dashboard({
         </div>
 
         <div className="bg-zinc-900/90 border border-zinc-800 p-3.5 rounded-2xl shadow-lg">
-          <span className="text-[10px] font-mono text-zinc-500 uppercase block">Session PNL</span>
+          <span className="text-[10px] font-mono text-zinc-500 uppercase block">Session PNL (Equity - Bal)</span>
           <strong className={`text-base font-black font-mono block mt-1 ${pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
             {pnl >= 0 ? `+$${pnl.toFixed(2)}` : `-$${Math.abs(pnl).toFixed(2)}`}
           </strong>
         </div>
       </div>
 
-      {/* SANDBOX BACKTEST */}
+      {/* 3. CONTADORES REAIS DO DIA (HOJE NA FTMO) */}
+      <div className="bg-zinc-900/90 border border-zinc-800 p-4 rounded-2xl shadow-xl space-y-3">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Activity size={15} className="text-emerald-400" />
+            <h4 className="text-xs font-bold text-zinc-200 uppercase font-mono">Today's Live Performance</h4>
+          </div>
+          <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-zinc-800 text-zinc-400">
+            {stats.total_trades} Closed Deals
+          </span>
+        </div>
+
+        <div className="grid grid-cols-3 gap-2 text-center">
+          <div className="bg-zinc-950 p-2.5 rounded-xl border border-zinc-800/80">
+            <span className="text-[9px] font-mono text-zinc-500 block uppercase">Win / Loss</span>
+            <strong className="text-xs font-bold font-mono text-zinc-200 mt-0.5 block">
+              <span className="text-emerald-400">{stats.wins}W</span> / <span className="text-rose-400">{stats.losses}L</span>
+            </strong>
+          </div>
+
+          <div className="bg-zinc-950 p-2.5 rounded-xl border border-zinc-800/80">
+            <span className="text-[9px] font-mono text-zinc-500 block uppercase">Win Rate</span>
+            <strong className="text-xs font-bold font-mono text-zinc-100 mt-0.5 block">
+              {stats.win_rate}%
+            </strong>
+          </div>
+
+          <div className="bg-zinc-950 p-2.5 rounded-xl border border-zinc-800/80">
+            <span className="text-[9px] font-mono text-zinc-500 block uppercase">Realized PnL</span>
+            <strong className={`text-xs font-black font-mono mt-0.5 block ${stats.realized_pnl >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
+              {stats.realized_pnl >= 0 ? `+$${stats.realized_pnl.toFixed(2)}` : `-$${Math.abs(stats.realized_pnl).toFixed(2)}`}
+            </strong>
+          </div>
+        </div>
+
+        {/* POSIÇÕES ABERTAS AGORA (AO VIVO) */}
+        <div>
+          <span className="text-[10px] font-mono text-zinc-400 uppercase tracking-wider block mb-1.5">
+            Active Positions ({stats.open_count})
+          </span>
+          {stats.open_positions && stats.open_positions.length > 0 ? (
+            <div className="space-y-1.5">
+              {stats.open_positions.map((pos) => (
+                <div key={pos.ticket} className="bg-zinc-950 border border-zinc-800 p-2.5 rounded-xl flex items-center justify-between text-[11px] font-mono">
+                  <div className="flex items-center gap-2">
+                    <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold ${pos.type === 'BUY' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-rose-500/20 text-rose-400'}`}>
+                      {pos.type}
+                    </span>
+                    <strong className="text-zinc-200">{pos.symbol}</strong>
+                    <span className="text-zinc-500">({pos.volume} lots)</span>
+                  </div>
+                  <div className="text-right">
+                    <span className={`font-bold ${pos.profit >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                      {pos.profit >= 0 ? `+$${pos.profit.toFixed(2)}` : `-$${Math.abs(pos.profit).toFixed(2)}`}
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="p-2.5 bg-zinc-950/60 border border-zinc-800/60 rounded-xl text-center text-[10px] font-mono text-zinc-500">
+              No open positions. Monitoring market for fresh FVGs...
+            </div>
+          )}
+        </div>
+
+        {/* ÚLTIMOS TRADES FECHADOS HOJE */}
+        {stats.closed_trades && stats.closed_trades.length > 0 && (
+          <div>
+            <span className="text-[10px] font-mono text-zinc-400 uppercase tracking-wider block mb-1.5">
+              Recent Closed Trades Today
+            </span>
+            <div className="space-y-1 max-h-28 overflow-y-auto pr-1">
+              {stats.closed_trades.map((deal) => (
+                <div key={deal.ticket} className="bg-zinc-950/80 border border-zinc-800/50 p-2 rounded-lg flex items-center justify-between text-[10px] font-mono">
+                  <div className="flex items-center gap-1.5">
+                    <Clock size={10} className="text-zinc-500" />
+                    <span className="text-zinc-400">{deal.time}</span>
+                    <strong className="text-zinc-300">{deal.symbol}</strong>
+                    <span className={deal.type === 'BUY' ? 'text-emerald-400' : 'text-rose-400'}>({deal.type})</span>
+                  </div>
+                  <strong className={deal.profit >= 0 ? 'text-emerald-400' : 'text-rose-400'}>
+                    {deal.profit >= 0 ? `+$${deal.profit.toFixed(2)}` : `-$${Math.abs(deal.profit).toFixed(2)}`}
+                  </strong>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* 4. SANDBOX BACKTEST */}
       <div className="bg-gradient-to-br from-zinc-900 to-zinc-950 border border-zinc-800/80 p-4 rounded-2xl space-y-3 shadow-xl">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -87,7 +187,6 @@ export default function Dashboard({
           )}
         </div>
 
-        {/* SELETOR DE ATIVO */}
         <div>
           <span className="text-[10px] font-mono text-zinc-400 block mb-1.5 uppercase">Target Asset</span>
           <div className="grid grid-cols-2 gap-2">
@@ -112,7 +211,6 @@ export default function Dashboard({
           </div>
         </div>
 
-        {/* SELETOR DE DIAS */}
         <div>
           <span className="text-[10px] font-mono text-zinc-400 block mb-1.5 uppercase">Lookback Window (M5 ➔ M1 Execution)</span>
           <div className="grid grid-cols-4 gap-1.5">
@@ -149,19 +247,17 @@ export default function Dashboard({
         </button>
       </div>
 
-      {/* BOTÃO TRAVA DE EMERGÊNCIA */}
+      {/* 5. BOTÃO TRAVA DE EMERGÊNCIA */}
       <button
         onClick={() => setShowEmergencyModal(true)}
         className="w-full py-3 bg-rose-950/40 hover:bg-rose-900/60 border border-rose-800/60 text-rose-300 rounded-xl text-xs font-bold font-mono uppercase tracking-wider flex items-center justify-center gap-2 transition-all">
         <Power size={14} /> Emergency Stop (Flatten & Cancel)
       </button>
 
-      {/* MODAL QUANTITATIVO RICO: RESULTADO DO BACKTEST */}
+      {/* 6. MODAL DO BACKTEST */}
       {showReportModal && (
         <div className="fixed inset-0 bg-black/85 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-zinc-900 border border-zinc-800 w-full max-w-md rounded-2xl p-5 shadow-2xl relative animate-in fade-in zoom-in-95 duration-150 space-y-4">
-            
-            {/* Botão de Fechar que NUNCA reabre sozinho */}
             <button
               onClick={() => setShowReportModal(false)}
               className="absolute top-4 right-4 text-zinc-500 hover:text-zinc-200">
@@ -180,7 +276,6 @@ export default function Dashboard({
               </div>
             ) : latestBacktest ? (
               <>
-                {/* CABEÇALHO */}
                 <div className="flex items-center gap-3">
                   <div className="p-2.5 bg-amber-500/10 border border-amber-500/20 text-amber-400 rounded-xl">
                     <Trophy size={22} />
@@ -195,10 +290,7 @@ export default function Dashboard({
                   </div>
                 </div>
 
-                {/* CARDS COMPARATIVOS DETALHADOS (SNIPER, TÁTICO, GUARDIÃO) */}
                 <div className="space-y-2.5">
-                  
-                  {/* SNIPER */}
                   {latestBacktest.sniper && (
                     <div className={`p-3 rounded-xl border ${
                       latestBacktest.recommended === 'SNIPER'
@@ -240,7 +332,6 @@ export default function Dashboard({
                     </div>
                   )}
 
-                  {/* TACTICAL */}
                   {latestBacktest.tatico && (
                     <div className={`p-3 rounded-xl border ${
                       latestBacktest.recommended === 'TACTICAL'
@@ -282,7 +373,6 @@ export default function Dashboard({
                     </div>
                   )}
 
-                  {/* GUARDIAN */}
                   {latestBacktest.guardiao && (
                     <div className={`p-3 rounded-xl border ${
                       latestBacktest.recommended === 'GUARDIAN'
@@ -323,10 +413,8 @@ export default function Dashboard({
                       </div>
                     </div>
                   )}
-
                 </div>
 
-                {/* BOTÃO DE APLICAÇÃO */}
                 <div className="bg-zinc-950 p-3 rounded-xl border border-zinc-800/80 flex items-center justify-between">
                   <div>
                     <span className="text-[10px] text-zinc-500 font-mono uppercase block">Recommended Choice</span>
@@ -346,7 +434,7 @@ export default function Dashboard({
         </div>
       )}
 
-      {/* MODAL EMERGÊNCIA */}
+      {/* 7. MODAL EMERGÊNCIA */}
       {showEmergencyModal && (
         <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-zinc-900 border border-zinc-800 w-full max-w-sm rounded-2xl p-5 shadow-2xl relative animate-in fade-in zoom-in-95 duration-150">
