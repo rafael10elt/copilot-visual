@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { 
   UserCheck, Power, Sparkles, BarChart3, AlertTriangle, X, 
   CheckCircle2, Trophy, ArrowRight, Loader2, Activity, Clock, 
-  Radar, Cpu, Sliders, ShieldCheck, Zap, Crosshair
+  Radar, Cpu, Sliders, ShieldCheck, Zap, Crosshair, TableProperties
 } from 'lucide-react';
 
 export default function Dashboard({ 
@@ -22,7 +22,7 @@ export default function Dashboard({
   const [showEmergencyModal, setShowEmergencyModal] = useState(false);
   const [selectedAsset, setSelectedAsset] = useState('US100');
   const [selectedDays, setSelectedDays] = useState(5);
-  const [backtestViewTab, setBacktestViewTab] = useState('compare');
+  const [backtestViewTab, setBacktestViewTab] = useState('raio_x'); // 'raio_x', 'compare'
 
   const currentRiskBase = Number(settings?.risk_per_trade || 50);
   const stats = status?.today_stats || {
@@ -48,11 +48,13 @@ export default function Dashboard({
     onRunBacktest(selectedDays, selectedAsset);
   };
 
-  const applyRecommendedProfile = (recommended) => {
-    let profileKey = 'tatico';
-    if (recommended.includes('GUARDIAN')) profileKey = 'guardiao';
-    else if (recommended.includes('SNIPER')) profileKey = 'sniper';
-    onUpdateSettings({ profile: profileKey });
+  const applyCustomStrategy = (item) => {
+    onUpdateSettings({
+      profile: item.profile_key,
+      use_ce_50: item.entry.includes('50%'),
+      require_sweep: item.sweep.includes('Com'),
+      breakeven_enabled: item.with_be
+    });
     setShowReportModal(false);
   };
 
@@ -296,13 +298,13 @@ export default function Dashboard({
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Sparkles size={15} className="text-amber-400" />
-            <h4 className="text-xs font-bold text-zinc-200 uppercase font-mono">Sandbox Backtest (A/B Test)</h4>
+            <h4 className="text-xs font-bold text-zinc-200 uppercase font-mono">Sandbox Backtest (Raio-X Geral)</h4>
           </div>
           {latestBacktest && !isBacktestLoading && (
             <button
               onClick={() => setShowReportModal(true)}
               className="text-[10px] font-mono font-bold text-violet-400 hover:text-violet-300 underline flex items-center gap-1">
-              Ver Relatório A/B <ArrowRight size={10} />
+              Abrir Raio-X <ArrowRight size={10} />
             </button>
           )}
         </div>
@@ -356,12 +358,12 @@ export default function Dashboard({
           {isBacktestLoading ? (
             <>
               <Loader2 size={14} className="animate-spin text-amber-400" />
-              <span>Simulando A/B (Com e Sem BE) para {selectedAsset}...</span>
+              <span>Simulando Raio-X Geral para {selectedAsset}...</span>
             </>
           ) : (
             <>
               <BarChart3 size={14} />
-              <span>Rodar Backtest A/B ({selectedAsset} - {selectedDays}D)</span>
+              <span>Executar Raio-X Completo ({selectedAsset} - {selectedDays}D)</span>
             </>
           )}
         </button>
@@ -374,10 +376,10 @@ export default function Dashboard({
         <Power size={14} /> Trava de Emergência (Zerar Tudo)
       </button>
 
-      {/* 8. MODAL DO BACKTEST COMPLETO (SEM BARRA LATERAL FEIA) */}
+      {/* 8. MODAL DO RAIO-X INSTITUCIONAL (SEM SCROLLBAR) */}
       {showReportModal && (
-        <div className="fixed inset-0 bg-black/85 backdrop-blur-sm z-50 flex items-center justify-center p-3 sm:p-4">
-          <div className="bg-zinc-900 border border-zinc-800 w-full max-w-lg rounded-2xl p-5 shadow-2xl relative animate-in fade-in zoom-in-95 duration-150 space-y-4 max-h-[92vh] overflow-y-auto no-scrollbar">
+        <div className="fixed inset-0 bg-black/85 backdrop-blur-sm z-50 flex items-center justify-center p-2 sm:p-4">
+          <div className="bg-zinc-900 border border-zinc-800 w-full max-w-xl rounded-2xl p-4 sm:p-5 shadow-2xl relative space-y-4 max-h-[92vh] overflow-y-auto no-scrollbar">
             <button
               onClick={() => setShowReportModal(false)}
               className="absolute top-4 right-4 text-zinc-500 hover:text-zinc-200">
@@ -388,9 +390,9 @@ export default function Dashboard({
               <div className="py-12 flex flex-col items-center justify-center text-center space-y-3">
                 <Loader2 size={36} className="animate-spin text-amber-400" />
                 <div>
-                  <h3 className="text-sm font-bold text-zinc-100 font-mono">Executando Simulação A/B Completa</h3>
+                  <h3 className="text-sm font-bold text-zinc-100 font-mono">Processando Raio-X Geral</h3>
                   <p className="text-[11px] text-zinc-400 font-mono mt-1">
-                    Analisando retestes, spreads e proteções de Break-Even...
+                    Simulando todas as combinações de entrada e gestão vela a vela...
                   </p>
                 </div>
               </div>
@@ -402,57 +404,96 @@ export default function Dashboard({
                   </div>
                   <div>
                     <h3 className="text-sm font-bold text-zinc-100 font-mono uppercase">
-                      {latestBacktest.symbol} Relatório Completo A/B
+                      {latestBacktest.symbol} Raio-X Geral ({latestBacktest.days}D)
                     </h3>
                     <span className="text-[10px] text-zinc-400 font-mono">
-                      {latestBacktest.days}D • {latestBacktest.setups} Setups • Risco: ${latestBacktest.base_risk || currentRiskBase}
+                      {latestBacktest.setups} Setups Históricos Mapeados • Risco Base: ${latestBacktest.base_risk || currentRiskBase}
                     </span>
                   </div>
                 </div>
 
-                {latestBacktest.strategy_info && (
-                  <div className="bg-zinc-950 p-2.5 rounded-xl border border-zinc-800/80 grid grid-cols-3 gap-2 text-[9px] font-mono text-zinc-400">
-                    <div>
-                      <span className="text-zinc-500 block">Entrada:</span>
-                      <strong className="text-zinc-200">{latestBacktest.strategy_info.entry}</strong>
-                    </div>
-                    <div>
-                      <span className="text-zinc-500 block">Sessões:</span>
-                      <strong className="text-zinc-200">{latestBacktest.strategy_info.sessions}</strong>
-                    </div>
-                    <div>
-                      <span className="text-zinc-500 block">Visão:</span>
-                      <strong className="text-emerald-400">{latestBacktest.strategy_info.cv_filter}</strong>
-                    </div>
-                  </div>
-                )}
-
-                {/* TABS COMPARATIVAS */}
-                <div className="grid grid-cols-3 gap-1 bg-zinc-950 p-1 rounded-xl border border-zinc-800 text-[10px] font-mono font-bold">
+                {/* TABS DO MODAL */}
+                <div className="grid grid-cols-2 gap-1 bg-zinc-950 p-1 rounded-xl border border-zinc-800 text-[11px] font-mono font-bold">
+                  <button
+                    onClick={() => setBacktestViewTab('raio_x')}
+                    className={`py-1.5 rounded-lg transition-all flex items-center justify-center gap-1.5 ${
+                      backtestViewTab === 'raio_x' ? 'bg-zinc-800 text-amber-300 shadow' : 'text-zinc-500 hover:text-zinc-300'
+                    }`}>
+                    <TableProperties size={13} /> Matriz Raio-X (Ranking)
+                  </button>
                   <button
                     onClick={() => setBacktestViewTab('compare')}
                     className={`py-1.5 rounded-lg transition-all ${
                       backtestViewTab === 'compare' ? 'bg-zinc-800 text-zinc-100 shadow' : 'text-zinc-500 hover:text-zinc-300'
                     }`}>
-                    Lado a Lado (A/B)
-                  </button>
-                  <button
-                    onClick={() => setBacktestViewTab('with_be')}
-                    className={`py-1.5 rounded-lg transition-all ${
-                      backtestViewTab === 'with_be' ? 'bg-zinc-800 text-emerald-400 shadow' : 'text-zinc-500 hover:text-zinc-300'
-                    }`}>
-                    Com Break-Even
-                  </button>
-                  <button
-                    onClick={() => setBacktestViewTab('no_be')}
-                    className={`py-1.5 rounded-lg transition-all ${
-                      backtestViewTab === 'no_be' ? 'bg-zinc-800 text-blue-400 shadow' : 'text-zinc-500 hover:text-zinc-300'
-                    }`}>
-                    Sem Break-Even
+                    Visão Clássica A/B
                   </button>
                 </div>
 
-                {/* VISÃO COMPARATIVA */}
+                {/* TAB 1: MATRIZ DE RAIO-X COMPLETA */}
+                {backtestViewTab === 'raio_x' && latestBacktest.raio_x && (
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between text-[10px] font-mono text-zinc-400 px-1">
+                      <span>Todas as Combinações Testadas:</span>
+                      <span className="text-amber-400 font-bold">Ordenado por PnL</span>
+                    </div>
+
+                    <div className="space-y-1.5 max-h-[50vh] overflow-y-auto no-scrollbar pr-1">
+                      {latestBacktest.raio_x.map((item, idx) => (
+                        <div
+                          key={item.id}
+                          className={`p-2.5 rounded-xl border text-[11px] font-mono flex items-center justify-between transition-all ${
+                            idx === 0
+                              ? 'bg-amber-500/10 border-amber-500/40 shadow-sm'
+                              : 'bg-zinc-950 border-zinc-800/80 hover:border-zinc-700'
+                          }`}>
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-1.5 mb-1">
+                              {idx === 0 && (
+                                <span className="text-[9px] font-black px-1.5 py-0.2 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                                  #1 MELHOR
+                                </span>
+                              )}
+                              <strong className="text-zinc-200">{item.profile}</strong>
+                              <span className="text-zinc-500">•</span>
+                              <span className="text-zinc-300 font-semibold">{item.entry}</span>
+                              <span className="text-zinc-500">•</span>
+                              <span className={item.with_be ? 'text-emerald-400' : 'text-blue-400'}>{item.be_label}</span>
+                              <span className="text-zinc-500">•</span>
+                              <span className="text-zinc-400">{item.sweep}</span>
+                            </div>
+
+                            <div className="flex items-center gap-3 text-[10px] text-zinc-400">
+                              <span>Setups: <strong className="text-zinc-200">{item.setups}</strong></span>
+                              <span>Win: <strong className="text-zinc-200">{item.win_rate}%</strong> ({item.wins}W / {item.losses}L)</span>
+                              {item.be_count > 0 && <span>BEs: <strong className="text-zinc-300">{item.be_count}</strong></span>}
+                            </div>
+                          </div>
+
+                          <div className="text-right flex items-center gap-2.5">
+                            <div>
+                              <strong className={`block text-xs font-black ${item.pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                                {item.net_r >= 0 ? `+${item.net_r}R` : `${item.net_r}R`}
+                              </strong>
+                              <span className={`text-[10px] font-bold ${item.pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                                ${item.pnl}
+                              </span>
+                            </div>
+
+                            <button
+                              onClick={() => applyCustomStrategy(item)}
+                              title="Aplicar esta estratégia na conta"
+                              className="px-2 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-[10px] text-zinc-200 font-bold">
+                              Usar
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* TAB 2: VISÃO CLÁSSICA LADO A LADO */}
                 {backtestViewTab === 'compare' && (
                   <div className="space-y-2">
                     {[
@@ -474,7 +515,7 @@ export default function Dashboard({
                               <span className="text-[9px] text-emerald-400 font-bold block mb-1">COM BREAK-EVEN</span>
                               <div className="space-y-0.5 text-zinc-400">
                                 <div>Win: <strong className="text-zinc-200">{withBeData.rate}%</strong> ({withBeData.wins}W / {withBeData.losses}L)</div>
-                                {withBeData.be_count && <div>Saídas BE: <strong className="text-zinc-300">{withBeData.be_count}</strong></div>}
+                                {withBeData.be_count && <div>BEs: <strong className="text-zinc-300">{withBeData.be_count}</strong></div>}
                                 <div>Net R: <strong className={withBeData.net_r >= 0 ? "text-emerald-400" : "text-rose-400"}>{withBeData.net_r >= 0 ? `+${withBeData.net_r}R` : `${withBeData.net_r}R`}</strong></div>
                                 <div>PnL: <strong className={withBeData.pnl >= 0 ? "text-emerald-400 font-bold" : "text-rose-400 font-bold"}>${withBeData.pnl}</strong></div>
                               </div>
@@ -495,46 +536,21 @@ export default function Dashboard({
                   </div>
                 )}
 
-                {/* VISÃO INDIVIDUAL */}
-                {backtestViewTab !== 'compare' && (
-                  <div className="space-y-2">
-                    {['guardiao', 'tatico', 'sniper'].map((pKey) => {
-                      const currentDataset = backtestViewTab === 'with_be' 
-                        ? (latestBacktest.with_be?.[pKey] || latestBacktest[pKey]) 
-                        : (latestBacktest.without_be?.[pKey] || latestBacktest[pKey]);
-                      const title = pKey === 'guardiao' ? 'GUARDIAN (1:1.5)' : pKey === 'tatico' ? 'TACTICAL (1:2.5)' : 'SNIPER (1:4.0)';
-                      return (
-                        <div key={pKey} className="bg-zinc-950 p-3 rounded-xl border border-zinc-800/80 flex items-center justify-between text-xs font-mono">
-                          <div>
-                            <strong className="text-zinc-200 block">{title}</strong>
-                            <span className="text-[10px] text-zinc-500">
-                              {currentDataset.wins}W / {currentDataset.losses}L {currentDataset.be_count ? `• ${currentDataset.be_count} BEs` : ''}
-                            </span>
-                          </div>
-                          <div className="text-right">
-                            <span className="text-[11px] font-bold text-zinc-300 block">{currentDataset.rate}% Win</span>
-                            <strong className={`text-xs font-black ${currentDataset.pnl >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
-                              {currentDataset.net_r >= 0 ? `+${currentDataset.net_r}R` : `${currentDataset.net_r}R`} (${currentDataset.pnl})
-                            </strong>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-
+                {/* DIRETIVA CAMPEÃ */}
                 <div className="bg-zinc-950 p-3 rounded-xl border border-zinc-800/80 flex items-center justify-between">
-                  <div>
+                  <div className="min-w-0 flex-1 pr-2">
                     <span className="text-[9px] text-zinc-500 font-mono uppercase block">Melhor Estrutura Global</span>
-                    <strong className="text-xs font-bold text-emerald-400 font-mono">
+                    <strong className="text-xs font-bold text-amber-300 font-mono block truncate">
                       {latestBacktest.recommended}
                     </strong>
                   </div>
-                  <button
-                    onClick={() => applyRecommendedProfile(latestBacktest.recommended)}
-                    className="px-3 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-bold font-mono transition-all flex items-center gap-1.5 shadow-md">
-                    <CheckCircle2 size={14} /> Aplicar Perfil
-                  </button>
+                  {latestBacktest.raio_x && latestBacktest.raio_x[0] && (
+                    <button
+                      onClick={() => applyCustomStrategy(latestBacktest.raio_x[0])}
+                      className="px-3 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-bold font-mono transition-all flex items-center gap-1.5 shadow-md shrink-0">
+                      <CheckCircle2 size={14} /> Aplicar #1
+                    </button>
+                  )}
                 </div>
               </>
             ) : null}
