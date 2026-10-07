@@ -1,0 +1,9 @@
+# Ignorar arquivos de chaves e senhas
+.env
+backend/.env
+*.env
+
+# Cache do Python
+__pycache__/
+*.pyc
+venv/
