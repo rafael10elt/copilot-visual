@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { 
   UserCheck, Power, Sparkles, BarChart3, AlertTriangle, X, 
   CheckCircle2, Trophy, ArrowRight, Loader2, Activity, Clock, 
-  Radar, Cpu, Sliders, ShieldCheck, Zap, Crosshair, TableProperties, Target, TrendingUp
+  Radar, Cpu, Sliders, ShieldCheck, Zap, Crosshair, TableProperties, Target
 } from 'lucide-react';
 
 export default function Dashboard({ 
@@ -21,7 +21,7 @@ export default function Dashboard({
 
   const [showEmergencyModal, setShowEmergencyModal] = useState(false);
   const [selectedAsset, setSelectedAsset] = useState('US100');
-  const [selectedDays, setSelectedDays] = useState(0); // 0 = Hoje
+  const [selectedDays, setSelectedDays] = useState(0);
   const [backtestViewTab, setBacktestViewTab] = useState('raio_x');
 
   const currentRiskBase = Number(settings?.risk_per_trade || 50);
@@ -60,33 +60,70 @@ export default function Dashboard({
     profit_factor: 0
   };
 
-  // Cálculo da porcentagem de conclusão da meta da mesa
   const progressPct = Math.min(100, Math.max(0, (stats30d.realized_pnl / Math.max(propTarget, 1)) * 100));
 
   const scoutDirectives = stats?.scout_directives || null;
-  const isAutoAI = stats?.is_auto_ai ?? !!settings?.auto_profile_ia;
+
+  // Estado das estratégias operacionais separadas por ativo
   const activeStrategy = stats?.active_strategy || {
-    entry_type: settings?.use_ce_50 !== false ? "50% Consequent Encroachment (CE)" : "Borda do FVG",
-    breakeven: settings?.breakeven_enabled !== false ? "ATIVO (1.2R)" : "DESLIGADO"
+    nasdaq: {
+      is_auto: false,
+      profile: settings?.nasdaq?.profile || settings?.profile || 'guardiao',
+      entry_type: '50% CE',
+      status: 'AUTORIZADO'
+    },
+    gold: {
+      is_auto: false,
+      profile: settings?.gold?.profile || settings?.profile || 'tatico',
+      entry_type: '50% CE',
+      status: 'AUTORIZADO'
+    },
+    breakeven: settings?.breakeven_enabled !== false ? "ATIVO (1.2R)" : "DESLIGADO",
+    trailing: settings?.trailing_enabled ? "ATIVO (M1)" : "DESLIGADO"
   };
 
   const handleBacktestClick = () => {
     onRunBacktest(selectedDays, selectedAsset);
   };
 
+  // Aplicação de estratégia direcionada especificamente para o ativo testado
   const applyCustomStrategy = (item) => {
-    onUpdateSettings({
+    const isNasdaq = latestBacktest?.symbol && anyIsNasdaq(latestBacktest.symbol);
+    const assetKey = isNasdaq ? 'nasdaq' : 'gold';
+
+    const currentAssetConfig = settings?.[assetKey] || {};
+    const updatedAssetConfig = {
+      ...currentAssetConfig,
+      auto_ia: false, // Ao fixar manualmente, desliga a IA para esse ativo
       profile: item.profile_key,
       use_ce_50: item.entry.includes('50%'),
-      require_sweep: item.sweep.includes('Com'),
+      require_sweep: item.sweep.includes('Com')
+    };
+
+    onUpdateSettings({
+      [assetKey]: updatedAssetConfig,
       breakeven_enabled: item.with_be
     });
+
     setShowReportModal(false);
+  };
+
+  const anyIsNasdaq = (sym) => {
+    const s = String(sym).toUpperCase();
+    return s.includes("US100") || s.includes("NAS") || s.includes("USTEC") || s.includes("NQ");
   };
 
   const formatDaysLabel = (d) => {
     if (d === 0 || d === "0") return "Sessão Atual (Hoje)";
     return `${d}D`;
+  };
+
+  const formatProfileLabel = (p) => {
+    if (!p) return 'GUARDIAN (1:1.5)';
+    const low = p.toLowerCase();
+    if (low === 'guardiao') return 'GUARDIAN (1:1.5)';
+    if (low === 'sniper') return 'SNIPER (1:4.0)';
+    return 'TACTICAL (1:2.5)';
   };
 
   return (
@@ -125,7 +162,6 @@ export default function Dashboard({
           </span>
         </div>
 
-        {/* Barra de Progresso da Meta */}
         <div>
           <div className="flex justify-between text-[10px] font-mono mb-1">
             <span className="text-zinc-400">
@@ -143,7 +179,6 @@ export default function Dashboard({
           </div>
         </div>
 
-        {/* Grade de Métricas 30D */}
         <div className="grid grid-cols-4 gap-2 pt-1 text-center">
           <div className="bg-zinc-950 p-2 rounded-xl border border-zinc-800/80">
             <span className="text-[8px] font-mono text-zinc-500 block uppercase">Net R (30D)</span>
@@ -175,53 +210,102 @@ export default function Dashboard({
         </div>
       </div>
 
-      {/* 3. MODO OPERACIONAL E ESTRATÉGIA NO COMANDO */}
-<div className="bg-gradient-to-r from-zinc-900 via-zinc-900/90 to-zinc-950 border border-zinc-800 p-3.5 rounded-2xl shadow-lg space-y-2.5">
-  <div className="flex items-center justify-between">
-    <div className="flex items-center gap-2">
-      <Cpu size={15} className={isAutoAI ? "text-violet-400" : "text-blue-400"} />
-      <span className="text-[11px] font-mono font-bold text-zinc-200 uppercase">
-        Modo Operacional
-      </span>
-    </div>
-    <span className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded-full border ${
-      isAutoAI 
-        ? 'bg-violet-500/20 text-violet-300 border-violet-500/40' 
-        : 'bg-zinc-800 text-zinc-300 border-zinc-700'
-    }`}>
-      {isAutoAI ? '🤖 IA / SCOUT AUTO' : '👤 MANUAL'}
-    </span>
-  </div>
+      {/* 3. MODO OPERACIONAL COM VISÃO INDEPENDENTE POR ATIVO */}
+      <div className="bg-zinc-900/90 border border-zinc-800 p-3.5 rounded-2xl shadow-xl space-y-3">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Cpu size={15} className="text-violet-400" />
+            <h4 className="text-xs font-bold text-zinc-200 uppercase font-mono">
+              Estratégia Operacional em Execução
+            </h4>
+          </div>
+          <span className="text-[9px] font-mono text-zinc-500">
+            Break-Even: <strong className={activeStrategy.breakeven.includes("ATIVO") ? "text-emerald-400" : "text-zinc-400"}>{activeStrategy.breakeven}</strong>
+          </span>
+        </div>
 
-  <div className="grid grid-cols-3 gap-2 text-[10px] font-mono bg-zinc-950/70 p-2.5 rounded-xl border border-zinc-800/60">
-    <div>
-      <span className="text-zinc-500 block">Perfil Ativo:</span>
-      <strong className="text-emerald-400 font-bold uppercase">
-        {settings?.profile === 'guardiao' ? 'GUARDIAN (1:1.5)' : settings?.profile === 'sniper' ? 'SNIPER (1:4.0)' : 'TACTICAL (1:2.5)'}
-      </strong>
-    </div>
-    <div>
-      <span className="text-zinc-500 block">Entrada FVG:</span>
-      <strong className="text-zinc-200 font-semibold">{activeStrategy.entry_type.replace('Consequent Encroachment ', '')}</strong>
-    </div>
-    <div>
-      <span className="text-zinc-500 block">Break-Even:</span>
-      <strong className={activeStrategy.breakeven.includes("ATIVO") ? "text-emerald-400 font-semibold" : "text-zinc-400"}>
-        {activeStrategy.breakeven}
-      </strong>
-    </div>
-  </div>
-</div>
+        <div className="grid grid-cols-2 gap-2.5">
+          {/* PAINEL NASDAQ */}
+          <div className="bg-zinc-950 p-3 rounded-xl border border-zinc-800/80 space-y-2">
+            <div className="flex items-center justify-between border-b border-zinc-800/60 pb-1.5">
+              <strong className="text-xs text-zinc-200 font-mono">NASDAQ (US100)</strong>
+              <span className={`text-[8px] font-mono font-bold px-1.5 py-0.5 rounded border ${
+                activeStrategy.nasdaq.is_auto 
+                  ? 'bg-violet-500/20 text-violet-300 border-violet-500/40' 
+                  : 'bg-zinc-800 text-zinc-300 border-zinc-700'
+              }`}>
+                {activeStrategy.nasdaq.is_auto ? '🤖 AUTO IA (30D)' : '👤 MANUAL'}
+              </span>
+            </div>
+            
+            <div className="space-y-1 text-[10px] font-mono">
+              <div className="flex justify-between">
+                <span className="text-zinc-500">Perfil:</span>
+                <strong className="text-emerald-400">{formatProfileLabel(activeStrategy.nasdaq.profile)}</strong>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-zinc-500">Entrada:</span>
+                <strong className="text-zinc-300">{activeStrategy.nasdaq.entry_type}</strong>
+              </div>
+              <div className="flex justify-between items-center pt-0.5">
+                <span className="text-zinc-500">Status:</span>
+                <span className={`text-[8px] font-bold px-1.5 py-0.2 rounded border ${
+                  activeStrategy.nasdaq.status === 'AUTORIZADO'
+                    ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
+                    : 'bg-amber-500/10 text-amber-400 border-amber-500/20'
+                }`}>
+                  {activeStrategy.nasdaq.status}
+                </span>
+              </div>
+            </div>
+          </div>
 
-      {/* 4. RADAR DO STRATEGY SCOUT */}
+          {/* PAINEL XAUUSD (GOLD) */}
+          <div className="bg-zinc-950 p-3 rounded-xl border border-zinc-800/80 space-y-2">
+            <div className="flex items-center justify-between border-b border-zinc-800/60 pb-1.5">
+              <strong className="text-xs text-zinc-200 font-mono">XAUUSD (GOLD)</strong>
+              <span className={`text-[8px] font-mono font-bold px-1.5 py-0.5 rounded border ${
+                activeStrategy.gold.is_auto 
+                  ? 'bg-violet-500/20 text-violet-300 border-violet-500/40' 
+                  : 'bg-zinc-800 text-zinc-300 border-zinc-700'
+              }`}>
+                {activeStrategy.gold.is_auto ? '🤖 AUTO IA (30D)' : '👤 MANUAL'}
+              </span>
+            </div>
+
+            <div className="space-y-1 text-[10px] font-mono">
+              <div className="flex justify-between">
+                <span className="text-zinc-500">Perfil:</span>
+                <strong className="text-blue-400">{formatProfileLabel(activeStrategy.gold.profile)}</strong>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-zinc-500">Entrada:</span>
+                <strong className="text-zinc-300">{activeStrategy.gold.entry_type}</strong>
+              </div>
+              <div className="flex justify-between items-center pt-0.5">
+                <span className="text-zinc-500">Status:</span>
+                <span className={`text-[8px] font-bold px-1.5 py-0.2 rounded border ${
+                  activeStrategy.gold.status === 'AUTORIZADO'
+                    ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
+                    : 'bg-amber-500/10 text-amber-400 border-amber-500/20'
+                }`}>
+                  {activeStrategy.gold.status}
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* 4. RADAR DO STRATEGY SCOUT (30D) */}
       <div className="bg-zinc-900/90 border border-zinc-800 p-4 rounded-2xl shadow-xl space-y-2.5">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Radar size={15} className="text-amber-400 animate-pulse" />
-            <h4 className="text-xs font-bold text-zinc-200 uppercase font-mono">Strategy Scout (Diretrizes)</h4>
+            <h4 className="text-xs font-bold text-zinc-200 uppercase font-mono">Strategy Scout (Diretrizes 30D)</h4>
           </div>
           <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-zinc-800 text-amber-300 border border-amber-500/20">
-            Auto-Calibrador (10D)
+            Base: 30 Dias
           </span>
         </div>
 
@@ -239,7 +323,7 @@ export default function Dashboard({
                 </span>
               </div>
               <div className="text-[10px] font-mono text-zinc-400">
-                Perfil: <strong className="text-zinc-200">{scoutDirectives.NASDAQ?.recommended_profile?.toUpperCase()}</strong>
+                Sugerido: <strong className="text-zinc-200">{formatProfileLabel(scoutDirectives.NASDAQ?.recommended_profile)}</strong>
               </div>
               <div className="text-[9px] font-mono text-zinc-500 flex justify-between">
                 <span>Score: <strong className="text-zinc-300">{scoutDirectives.NASDAQ?.prop_score}</strong></span>
@@ -259,7 +343,7 @@ export default function Dashboard({
                 </span>
               </div>
               <div className="text-[10px] font-mono text-zinc-400">
-                Perfil: <strong className="text-zinc-200">{scoutDirectives.GOLD?.recommended_profile?.toUpperCase()}</strong>
+                Sugerido: <strong className="text-zinc-200">{formatProfileLabel(scoutDirectives.GOLD?.recommended_profile)}</strong>
               </div>
               <div className="text-[9px] font-mono text-zinc-500 flex justify-between">
                 <span>Score: <strong className="text-zinc-300">{scoutDirectives.GOLD?.prop_score}</strong></span>
@@ -269,7 +353,7 @@ export default function Dashboard({
           </div>
         ) : (
           <div className="p-3 bg-zinc-950/60 rounded-xl text-center text-[10px] font-mono text-zinc-500">
-            Strategy Scout calibrando permutações institucionais...
+            Strategy Scout calibrando permutações de 30 dias...
           </div>
         )}
       </div>
@@ -291,7 +375,7 @@ export default function Dashboard({
         </div>
       </div>
 
-      {/* 6. CONTADORES REAIS DO DIA (TODAY) */}
+      {/* 6. CONTADORES REAIS DO DIA */}
       <div className="bg-zinc-900/90 border border-zinc-800 p-4 rounded-2xl shadow-xl space-y-3">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -333,7 +417,6 @@ export default function Dashboard({
           </div>
         </div>
 
-        {/* POSIÇÕES ABERTAS AGORA */}
         <div>
           <span className="text-[10px] font-mono text-zinc-400 uppercase tracking-wider block mb-1.5">
             Active Positions ({stats.open_count})
@@ -364,7 +447,6 @@ export default function Dashboard({
           )}
         </div>
 
-        {/* ÚLTIMOS TRADES */}
         {stats.closed_trades && stats.closed_trades.length > 0 && (
           <div>
             <span className="text-[10px] font-mono text-zinc-400 uppercase tracking-wider block mb-1.5">
@@ -394,7 +476,7 @@ export default function Dashboard({
         )}
       </div>
 
-      {/* 7. SANDBOX BACKTEST COM RANGE ESTENDIDO (ATÉ 30D) */}
+      {/* 7. SANDBOX BACKTEST COM RANGE ESTENDIDO */}
       <div className="bg-gradient-to-br from-zinc-900 to-zinc-950 border border-zinc-800/80 p-4 rounded-2xl space-y-3 shadow-xl">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -435,7 +517,7 @@ export default function Dashboard({
         </div>
 
         <div>
-          <span className="text-[10px] font-mono text-zinc-400 block mb-1.5 uppercase">Janela de Teste Institucional</span>
+          <span className="text-[10px] font-mono text-zinc-400 block mb-1.5 uppercase">Janela de Teste</span>
           <div className="grid grid-cols-5 gap-1.5">
             {[
               { label: 'Hoje', val: 0 },
@@ -483,7 +565,7 @@ export default function Dashboard({
         <Power size={14} /> Trava de Emergência (Zerar Tudo)
       </button>
 
-      {/* 9. MODAL DO RELATÓRIO REALISTA (COM FRICÇÃO DE MESA) */}
+      {/* 9. MODAL DO RELATÓRIO REALISTA COM DIRECIONAMENTO POR ATIVO */}
       {showReportModal && (
         <div className="fixed inset-0 bg-black/85 backdrop-blur-sm z-50 flex items-center justify-center p-2 sm:p-4">
           <div className="bg-zinc-900 border border-zinc-800 w-full max-w-xl rounded-2xl p-4 sm:p-5 shadow-2xl relative space-y-4 max-h-[92vh] overflow-y-auto no-scrollbar">
@@ -499,7 +581,7 @@ export default function Dashboard({
                 <div>
                   <h3 className="text-sm font-bold text-zinc-100 font-mono">Processando Execução Realista</h3>
                   <p className="text-[11px] text-zinc-400 font-mono mt-1">
-                    Simulando ordens sequenciais, spreads dinâmicos, comissões e janelas de até 30 dias...
+                    Simulando ordens sequenciais, spreads dinâmicos e comissões da mesa...
                   </p>
                 </div>
               </div>
@@ -516,7 +598,7 @@ export default function Dashboard({
                     <div className="flex items-center gap-2 text-[10px] text-zinc-400 font-mono mt-0.5">
                       <span>Mapeados: <strong className="text-zinc-300">{latestBacktest.setups_mapped}</strong></span>
                       <span>•</span>
-                      <span>Executados na Realidade: <strong className="text-emerald-400 font-bold">{latestBacktest.trades_executed}</strong></span>
+                      <span>Executados: <strong className="text-emerald-400 font-bold">{latestBacktest.trades_executed}</strong></span>
                       <span>•</span>
                       <span>Risco: ${latestBacktest.base_risk || currentRiskBase}</span>
                     </div>
@@ -599,7 +681,7 @@ export default function Dashboard({
 
                             <button
                               onClick={() => applyCustomStrategy(item)}
-                              title="Aplicar esta estratégia na conta"
+                              title={`Aplicar apenas no ${latestBacktest.symbol}`}
                               className="px-2 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-[10px] text-zinc-200 font-bold">
                               Usar
                             </button>

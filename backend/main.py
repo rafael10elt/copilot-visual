@@ -1,4 +1,4 @@
-# main.py — Orquestrador HFT com Métricas 30D, Trailing Stop M1 e Escudos Institucionais
+# main.py — Orquestrador HFT com Controle Híbrido Independente (NASDAQ e GOLD)
 import time
 import json
 import requests
@@ -175,7 +175,6 @@ def close_all_open_positions():
     return closed
 
 def manage_open_trades(engine, risk_manager, settings):
-    """Gerencia Break-Even e Trailing Stop M1 de posições ativas simultaneamente."""
     be_enabled = settings.get("breakeven_enabled", False)
     trailing_enabled = settings.get("trailing_enabled", False)
 
@@ -194,7 +193,7 @@ def manage_open_trades(engine, risk_manager, settings):
         open_price = p.price_open
         current_sl = p.sl
 
-        # 1. Rastreamento por Trailing Stop (M1) se ativado
+        # Trailing Stop M1
         if trailing_enabled:
             df_m1 = engine.get_candles(p.symbol, mt5.TIMEFRAME_M1, 3)
             if df_m1 is not None and len(df_m1) >= 2:
@@ -215,7 +214,7 @@ def manage_open_trades(engine, risk_manager, settings):
                         print(f"📈 [TRAILING M1] #{p.ticket} ({p.symbol}) SL ajustado para {new_trail_sl}")
                     continue
 
-        # 2. Break-Even tradicional caso o Trailing não tenha atuado
+        # Break-Even
         if be_enabled:
             if p.type == mt5.POSITION_TYPE_BUY and current_sl >= open_price: continue
             if p.type == mt5.POSITION_TYPE_SELL and current_sl > 0 and current_sl <= open_price: continue
@@ -349,7 +348,6 @@ def get_performance_stats(risk_base=50.0):
                 "realized_pnl": 0.0, "net_r": 0.0, "max_drawdown_usd": 0.0, "profit_factor": 0.0
             }
         }
-
 
 def run_recent_backtest(engine, symbol, days=0, risk_per_trade=50.0):
     if not symbol: return None
@@ -615,16 +613,16 @@ def main():
     vision = VisionLiquidityAnalyzer()
     news_filter = EconomicNewsFilter()
 
+    # Strategy Scout agora ancorado em 30 Dias
     scout = StrategyScout(engine, sync, eval_interval_seconds=3600)
     scout.start()
 
     processed_fvgs = set()
     last_hb = 0
-    current_profile = "tatico"
     active_mode = "BOTH"
     cached_settings = {}
 
-    sync.add_log(None, "Motor conectado com DST Automático, Trailing M1 e Background AI.", "INFO")
+    sync.add_log(None, "Motor conectado com Controle Híbrido Independente (NASDAQ e GOLD).", "INFO")
 
     try:
         while True:
@@ -649,7 +647,7 @@ def main():
             if is_news:
                 purged = cancel_all_pending_orders()
                 if purged > 0:
-                    sync.add_log(None, f"📰 [NEWS SHIELD] {purged} ordens pendentes canceladas por anúncio: {news_title}", "WARN")
+                    sync.add_log(None, f"📰 [NEWS SHIELD] {purged} ordens canceladas por anúncio: {news_title}", "WARN")
 
             agora = time.time()
             if agora - last_hb >= 2.0:
@@ -659,7 +657,6 @@ def main():
                 remote = sync.check_remote_settings()
                 if remote:
                     cached_settings = remote
-                    if remote.get("profile"): current_profile = remote.get("profile")
                     if remote.get("risk_per_trade"): risk_manager.risk_per_trade_usd = float(remote.get("risk_per_trade"))
                     if remote.get("max_daily_loss"): risk_manager.max_daily_loss_usd = float(remote.get("max_daily_loss"))
                     if remote.get("active_symbol_mode"): active_mode = remote.get("active_symbol_mode")
@@ -688,16 +685,46 @@ def main():
 
                 perf_data = get_performance_stats(risk_base=risk_manager.risk_per_trade_usd)
                 perf_data["scout_directives"] = scout.active_directives
-                perf_data["is_auto_ai"] = bool(cached_settings.get("auto_profile_ia", False))
+
+                # Configurações resolvidas independentemente para cada ativo
+                nasdaq_cfg = cached_settings.get("nasdaq") or {
+                    "auto_ia": cached_settings.get("auto_profile_ia", False),
+                    "profile": cached_settings.get("profile", "guardiao"),
+                    "use_ce_50": cached_settings.get("use_ce_50", True),
+                    "require_sweep": cached_settings.get("require_sweep", False)
+                }
+                gold_cfg = cached_settings.get("gold") or {
+                    "auto_ia": cached_settings.get("auto_profile_ia", False),
+                    "profile": cached_settings.get("profile", "tatico"),
+                    "use_ce_50": cached_settings.get("use_ce_50", True),
+                    "require_sweep": cached_settings.get("require_sweep", False)
+                }
+
+                dir_nasdaq = scout.get_directive("NASDAQ")
+                dir_gold = scout.get_directive("GOLD")
+
                 perf_data["active_strategy"] = {
-                    "entry_type": "50% Consequent Encroachment (CE)" if cached_settings.get("use_ce_50", True) else "Borda do FVG",
+                    "nasdaq": {
+                        "is_auto": bool(nasdaq_cfg.get("auto_ia", False)),
+                        "profile": dir_nasdaq.get("recommended_profile", nasdaq_cfg.get("profile")) if nasdaq_cfg.get("auto_ia") else nasdaq_cfg.get("profile", "guardiao"),
+                        "entry_type": "50% CE" if (dir_nasdaq.get("use_ce_50") if nasdaq_cfg.get("auto_ia") else nasdaq_cfg.get("use_ce_50", True)) else "Borda",
+                        "require_sweep": dir_nasdaq.get("require_sweep") if nasdaq_cfg.get("auto_ia") else nasdaq_cfg.get("require_sweep", False),
+                        "status": "AUTORIZADO" if (dir_nasdaq.get("should_trade") if nasdaq_cfg.get("auto_ia") else True) else "STAND-BY"
+                    },
+                    "gold": {
+                        "is_auto": bool(gold_cfg.get("auto_ia", False)),
+                        "profile": dir_gold.get("recommended_profile", gold_cfg.get("profile")) if gold_cfg.get("auto_ia") else gold_cfg.get("profile", "tatico"),
+                        "entry_type": "50% CE" if (dir_gold.get("use_ce_50") if gold_cfg.get("auto_ia") else gold_cfg.get("use_ce_50", True)) else "Borda",
+                        "require_sweep": dir_gold.get("require_sweep") if gold_cfg.get("auto_ia") else gold_cfg.get("require_sweep", False),
+                        "status": "AUTORIZADO" if (dir_gold.get("should_trade") if gold_cfg.get("auto_ia") else True) else "STAND-BY"
+                    },
                     "breakeven": "ATIVO (1.2R)" if cached_settings.get("breakeven_enabled", False) else "DESLIGADO",
                     "trailing": "ATIVO (M1)" if cached_settings.get("trailing_enabled", False) else "DESLIGADO"
                 }
 
-                sync.send_heartbeat(current_profile, pnl_today, login, balance, equity, server, perf_data)
+                # Heartbeat com telemetria rica
+                sync.send_heartbeat("hibrido", pnl_today, login, balance, equity, server, perf_data)
 
-            # Executa Break-Even e Trailing Stop M1 ativamente
             manage_open_trades(engine, risk_manager, cached_settings)
 
             if is_news:
@@ -727,15 +754,30 @@ def main():
                 ):
                     continue
 
-                is_auto = cached_settings.get("auto_profile_ia", False)
+                # RESOLUÇÃO HÍBRIDA POR ATIVO (AUTO IA 30D vs MANUAL)
+                cfg_key = "nasdaq" if category == "NASDAQ" else "gold"
+                asset_cfg = cached_settings.get(cfg_key) or {
+                    "auto_ia": cached_settings.get("auto_profile_ia", False),
+                    "profile": cached_settings.get("profile", "guardiao" if category == "NASDAQ" else "tatico"),
+                    "use_ce_50": cached_settings.get("use_ce_50", True),
+                    "require_sweep": cached_settings.get("require_sweep", False)
+                }
+
+                is_auto_asset = bool(asset_cfg.get("auto_ia", False))
                 directive = scout.get_directive(category)
 
-                if is_auto and not directive.get("should_trade", True):
+                # Se a IA estiver comandando este ativo e o score de 30D for negativo, trava em STAND-BY
+                if is_auto_asset and not directive.get("should_trade", True):
                     continue
 
-                active_profile_for_trade = directive.get("recommended_profile", current_profile) if is_auto else current_profile
-                use_ce_50 = directive.get("use_ce_50", True) if is_auto else cached_settings.get("use_ce_50", True)
-                require_sweep = directive.get("require_sweep", False) if is_auto else cached_settings.get("require_sweep", False)
+                if is_auto_asset:
+                    active_profile_for_trade = directive.get("recommended_profile", "guardiao")
+                    use_ce_50 = directive.get("use_ce_50", True)
+                    require_sweep = directive.get("require_sweep", False)
+                else:
+                    active_profile_for_trade = asset_cfg.get("profile", "guardiao" if category == "NASDAQ" else "tatico")
+                    use_ce_50 = asset_cfg.get("use_ce_50", True)
+                    require_sweep = asset_cfg.get("require_sweep", False)
 
                 df_m15 = engine.get_candles(symbol, mt5.TIMEFRAME_M15, 30)
                 df_m5 = engine.get_candles(symbol, mt5.TIMEFRAME_M5, 30)
@@ -751,7 +793,6 @@ def main():
                 info = mt5.symbol_info(symbol)
                 spread = info.spread if info else 10
                 
-                # Chamada assíncrona não-bloqueante
                 ia_agent.update_macro_regime_async(category, structure, atr, spread)
 
                 fvgs = fvg_detector.find_unmitigated_fvgs(df_m5, symbol)
@@ -806,7 +847,8 @@ def main():
 
                     ok, order_msg = send_limit_order(symbol, action, params["entry"], params["sl"], params["tp"], lot)
                     if ok:
-                        sync.add_log(symbol, f"ORDEM ARMADA ({'IA' if is_auto else 'MANUAL'} | {active_profile_for_trade.upper()}): {action} {lot}L @ {params['entry']}", "SUCCESS")
+                        mode_tag = "IA 30D" if is_auto_asset else "MANUAL"
+                        sync.add_log(symbol, f"ORDEM ARMADA ({mode_tag} | {active_profile_for_trade.upper()}): {action} {lot}L @ {params['entry']}", "SUCCESS")
                         processed_fvgs.add(fvg_id)
                         break
                     else:

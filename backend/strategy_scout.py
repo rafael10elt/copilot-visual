@@ -1,7 +1,8 @@
-# strategy_scout.py — Calibrador Walk-Forward com Janela Significativa e Simulação Integral de BE
+# strategy_scout.py — Calibrador Walk-Forward Institucional de 30 Dias por Ativo
 import time
 import threading
 import MetaTrader5 as mt5
+import numpy as np
 from datetime import datetime
 
 from mt5_core import FVGDetector, InstitutionalSessionFilter, VisionLiquidityAnalyzer
@@ -14,9 +15,26 @@ class StrategyScout:
         self.is_running = False
         self.thread = None
         
+        # Diretrizes com base de 30 dias para cada ativo
         self.active_directives = {
-            "NASDAQ": {"use_ce_50": True, "require_sweep": False, "recommended_profile": "guardiao", "prop_score": 0.0, "should_trade": True},
-            "GOLD": {"use_ce_50": True, "require_sweep": False, "recommended_profile": "tatico", "prop_score": 0.0, "should_trade": True}
+            "NASDAQ": {
+                "use_ce_50": True, 
+                "require_sweep": False, 
+                "recommended_profile": "guardiao", 
+                "prop_score": 0.0, 
+                "win_rate": 0,
+                "trades": 0,
+                "should_trade": True
+            },
+            "GOLD": {
+                "use_ce_50": True, 
+                "require_sweep": False, 
+                "recommended_profile": "tatico", 
+                "prop_score": 0.0, 
+                "win_rate": 0,
+                "trades": 0,
+                "should_trade": True
+            }
         }
 
     def start(self):
@@ -24,20 +42,20 @@ class StrategyScout:
             self.is_running = True
             self.thread = threading.Thread(target=self._run_loop, daemon=True)
             self.thread.start()
-            print("🔭 [STRATEGY SCOUT] Processo paralelo iniciado com sucesso.")
+            print("🔭 [STRATEGY SCOUT 30D] Motor de calibração mensal por ativo iniciado.")
 
     def _run_loop(self):
         time.sleep(5)
         while self.is_running:
             try:
-                # Janela expandida para 10 dias para evitar sobreajuste em amostras insignificantes
-                self.run_full_evaluation(days=10)
+                # Otimização com janela institucional de 30 dias de pregão
+                self.run_full_evaluation(days=30)
             except Exception as e:
-                print(f"⚠️ [STRATEGY SCOUT] Falha na calibração: {e}")
+                print(f"⚠️ [STRATEGY SCOUT] Falha na calibração de 30D: {e}")
 
             time.sleep(self.interval)
 
-    def run_full_evaluation(self, days=10, base_risk=50.0):
+    def run_full_evaluation(self, days=30, base_risk=50.0):
         for category in ["NASDAQ", "GOLD"]:
             symbol = self.engine.resolve_symbol(category)
             if not symbol:
@@ -48,15 +66,15 @@ class StrategyScout:
                 self.active_directives[category] = best_directive
                 status_trade = "AUTORIZADO" if best_directive["should_trade"] else "STAND-BY"
                 msg = (
-                    f"DIRETRIZ {category}: {best_directive['recommended_profile'].upper()} [{status_trade}] | "
+                    f"DIRETRIZ 30D [{category}]: {best_directive['recommended_profile'].upper()} [{status_trade}] | "
                     f"50%_CE={best_directive['use_ce_50']} | Sweep={best_directive['require_sweep']} | "
                     f"Score={best_directive['prop_score']:.1f} (WinRate: {best_directive['win_rate']}%, Trades: {best_directive['trades']})"
                 )
-                print(f"🎯 [SCOUT RECOMMENDATION] {msg}")
+                print(f"🎯 [SCOUT 30D] {msg}")
                 self.sync.add_log(symbol, msg, "SUCCESS" if best_directive["should_trade"] else "WARN")
 
     def _evaluate_symbol_matrix(self, symbol, days, base_risk):
-        total_m5 = int(days) * 240
+        total_m5 = int(days) * 288
         total_m1 = int(days) * 1440
 
         df_m5 = self.engine.get_candles(symbol, mt5.TIMEFRAME_M5, total_m5)
@@ -83,10 +101,10 @@ class StrategyScout:
         m1_times = df_m1['time'].values
 
         combinations = [
-            {"use_ce_50": True, "require_sweep": True},
             {"use_ce_50": True, "require_sweep": False},
-            {"use_ce_50": False, "require_sweep": True},
+            {"use_ce_50": True, "require_sweep": True},
             {"use_ce_50": False, "require_sweep": False},
+            {"use_ce_50": False, "require_sweep": True},
         ]
 
         profiles = ["guardiao", "tatico", "sniper"]
@@ -119,8 +137,9 @@ class StrategyScout:
                     if day_locked or daily_trades >= 5:
                         continue
 
-                    # Respeita o offset UTC calibrado
-                    if not InstitutionalSessionFilter.is_session_active(symbol, f['raw_time'], self.engine.broker_utc_offset_hours):
+                    if not InstitutionalSessionFilter.is_session_active(
+                        symbol, f['raw_time'], self.engine.broker_utc_offset_hours
+                    ):
                         continue
 
                     if comb["require_sweep"] and not f.get("has_sweep", False):
@@ -141,14 +160,11 @@ class StrategyScout:
                     if not path_ok:
                         continue
 
-                    start_idx = 0
-                    for idx in range(len(m1_times)):
-                        if m1_times[idx] >= f['raw_time']:
-                            start_idx = idx + 1
-                            break
+                    # Busca binária O(log N) para simular velas M1 sem lentidão em 30 dias
+                    start_idx = int(np.searchsorted(m1_times, np.datetime64(f['raw_time']), side='right'))
 
-                    if start_idx == 0 or start_idx >= len(m1_times): continue
-                    if start_idx <= bot_busy_until_m1_idx: continue
+                    if start_idx >= len(m1_times) or start_idx <= bot_busy_until_m1_idx:
+                        continue
 
                     sim_h = m1_highs[start_idx : min(start_idx + 120, len(m1_highs))]
                     sim_l = m1_lows[start_idx : min(start_idx + 120, len(m1_lows))]
@@ -157,7 +173,6 @@ class StrategyScout:
                     win, loss, hit_be = False, False, False
                     trade_res_idx = start_idx
 
-                    # Aplica fricção realista para preenchimento de ordem limite
                     strict_fill_penetration = spread_pts * 0.4
 
                     for step, (h, l) in enumerate(zip(sim_h, sim_l)):
@@ -167,7 +182,6 @@ class StrategyScout:
                             elif direction == "SELL" and h >= (entry + strict_fill_penetration): triggered = True
                             if not triggered: continue
 
-                        # Rastreamento completo de acionamento do Break-Even
                         if not hit_be:
                             if direction == "BUY" and h >= (entry + risk * 1.2): hit_be = True
                             elif direction == "SELL" and l <= (entry - risk * 1.2): hit_be = True
@@ -201,8 +215,8 @@ class StrategyScout:
 
                 total_resolved = wins + losses
                 
-                # Exigência de amostragem mínima de operações resolvidas
-                if total_resolved < 8:
+                # Exigência de amostragem mínima estatística para a janela de 30 dias
+                if total_resolved < 10:
                     continue
 
                 win_rate = (wins / total_resolved) * 100.0 if total_resolved > 0 else 0.0
@@ -229,5 +243,11 @@ class StrategyScout:
 
     def get_directive(self, category):
         return self.active_directives.get(category, {
-            "use_ce_50": True, "require_sweep": False, "recommended_profile": "guardiao", "should_trade": True
+            "use_ce_50": True, 
+            "require_sweep": False, 
+            "recommended_profile": "guardiao", 
+            "prop_score": 0.0,
+            "win_rate": 0,
+            "trades": 0,
+            "should_trade": True
         })
