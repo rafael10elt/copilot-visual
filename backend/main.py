@@ -1,4 +1,4 @@
-# main.py — Orquestrador HFT com Modo Manual/IA Flexível e Stop Loss Institucional Calibrado
+# main.py — Orquestrador HFT com Raio-X Geral de Estratégias e Backtest Cronológico
 import time
 import json
 from datetime import datetime, timedelta
@@ -226,10 +226,11 @@ def get_today_performance(risk_base=50.0):
             "realized_pnl": 0.0, "net_r": 0.0, "open_count": 0, "open_positions": [], "closed_trades": []
         }
 
-def run_recent_backtest(engine, symbol, days=5, risk_per_trade=50.0, use_ce_50=True, require_sweep=False, use_session_filter=True):
+def run_recent_backtest(engine, symbol, days=5, risk_per_trade=50.0):
     """
-    Backtest Institucional A/B Calibrado:
-    Simula e compara lado a lado COM e SEM Break-Even, com espaço para volatilidade.
+    RAIO-X COMPLETO DO MERCADO:
+    Gera todas as combinações (CE 50% vs Borda, Com Sweep vs Sem Sweep, Com BE vs Sem BE)
+    para fornecer um panorama institucional preciso.
     """
     if not symbol: return None
     total_m5 = int(days) * 240
@@ -241,159 +242,149 @@ def run_recent_backtest(engine, symbol, days=5, risk_per_trade=50.0, use_ce_50=T
     if df_m5 is None or df_m1 is None: return None
 
     is_nasdaq = "US100" in symbol or "NAS" in symbol or "USTEC" in symbol
-    min_stop_points = 6.0 if is_nasdaq else 1.2
+    min_stop_points = 5.0 if is_nasdaq else 1.2
     max_risk = 30.0 if is_nasdaq else 4.5
 
     detector = FVGDetector()
     vision = VisionLiquidityAnalyzer()
-    fvgs = detector.find_unmitigated_fvgs(df_m5, symbol)
+    
+    # Coleta TODOS os setups cronológicos formados nos 5 dias
+    all_fvgs = detector.find_all_historical_fvgs(df_m5, symbol)
 
     m1_highs = df_m1['high'].values
     m1_lows = df_m1['low'].values
     m1_times = df_m1['time'].values
 
-    no_be = {
-        "sniper": {"wins": 0, "losses": 0},
-        "tatico": {"wins": 0, "losses": 0},
-        "guardiao": {"wins": 0, "losses": 0}
-    }
+    # Matriz de Estratégias a simular
+    entry_modes = [("CE_50", True), ("BORDA", False)]
+    sweep_modes = [("COM_SWEEP", True), ("SEM_SWEEP", False)]
+    profiles = [("guardiao", 1.5, "GUARDIAN (1:1.5)"), ("tatico", 2.5, "TACTICAL (1:2.5)"), ("sniper", 4.0, "SNIPER (1:4.0)")]
 
-    with_be = {
-        "sniper": {"wins": 0, "losses": 0, "be_count": 0},
-        "tatico": {"wins": 0, "losses": 0, "be_count": 0},
-        "guardiao": {"wins": 0, "losses": 0, "be_count": 0}
-    }
+    raio_x_results = []
 
-    valid_setups = 0
+    for entry_label, use_ce_50 in entry_modes:
+        for sweep_label, req_sweep in sweep_modes:
+            for prof_key, mult, prof_label in profiles:
+                for with_be in [True, False]:
+                    wins, losses, be_count = 0, 0, 0
+                    setups_count = 0
 
-    for f in fvgs:
-        if use_session_filter and not InstitutionalSessionFilter.is_session_active(symbol, f['raw_time']):
-            continue
+                    for f in all_fvgs:
+                        # Filtro de Sweep opcional
+                        if req_sweep and not f['has_sweep']:
+                            continue
 
-        if require_sweep and not f.get("has_sweep", False):
-            continue
+                        direction = "BUY" if f['type'] == 'BULLISH' else "SELL"
+                        entry = f['ce_50'] if use_ce_50 else (f['top'] if direction == "BUY" else f['bottom'])
 
-        direction = "BUY" if f['type'] == 'BULLISH' else "SELL"
-        entry = f['ce_50'] if use_ce_50 else (f['top'] if direction == "BUY" else f['bottom'])
+                        raw_dist = abs(entry - (f['bottom'] if direction == "BUY" else f['top']))
+                        risk = min(max(raw_dist + (1.2 if is_nasdaq else 0.4), min_stop_points), max_risk)
 
-        # Stop Técnico Seguro (não deixa ficar menor que o ruído mínimo do ativo)
-        raw_dist = abs(entry - (f['bottom'] if direction == "BUY" else f['top']))
-        risk = min(max(raw_dist + (1.5 if is_nasdaq else 0.5), min_stop_points), max_risk)
+                        tp = entry + (risk * mult) if direction == "BUY" else entry - (risk * mult)
+                        sl = entry - risk if direction == "BUY" else entry + risk
 
-        tp_tatico = entry + (risk * 2.5) if direction == "BUY" else entry - (risk * 2.5)
+                        # Validação de visão
+                        path_ok, _ = vision.validate_liquidity_path(df_m5, direction, entry, tp)
+                        if not path_ok:
+                            continue
 
-        path_ok, _ = vision.validate_liquidity_path(df_m5, direction, entry, tp_tatico)
-        if not path_ok:
-            continue
+                        # Procura o candle M1 imediatamente APÓS a formação do setup
+                        start_idx = 0
+                        for idx in range(len(m1_times)):
+                            if m1_times[idx] >= f['raw_time']:
+                                start_idx = idx + 1
+                                break
 
-        valid_setups += 1
+                        if start_idx == 0 or start_idx >= len(m1_times): continue
+                        setups_count += 1
 
-        start_idx = 0
-        for idx in range(len(m1_times)):
-            if m1_times[idx] >= f['raw_time']:
-                start_idx = idx
-                break
+                        # Janela de até 120 velas M1 (2 horas de operação)
+                        sim_slice_h = m1_highs[start_idx : min(start_idx + 120, len(m1_highs))]
+                        sim_slice_l = m1_lows[start_idx : min(start_idx + 120, len(m1_lows))]
 
-        if start_idx == 0: continue
+                        triggered = False
+                        win, loss, hit_be = False, False, False
 
-        # Janela de resolução de 120 velas M1 (2 horas)
-        sim_slice_h = m1_highs[start_idx : min(start_idx + 120, len(m1_highs))]
-        sim_slice_l = m1_lows[start_idx : min(start_idx + 120, len(m1_lows))]
+                        for h, l in zip(sim_slice_h, sim_slice_l):
+                            if not triggered:
+                                if direction == "BUY" and l <= entry: triggered = True
+                                elif direction == "SELL" and h >= entry: triggered = True
+                                if not triggered: continue
 
-        for prof, mult in [('sniper', 4.0), ('tatico', 2.5), ('guardiao', 1.5)]:
-            tp = entry + (risk * mult) if direction == "BUY" else entry - (risk * mult)
-            sl = entry - risk if direction == "BUY" else entry + risk
+                            # Lógica Break-Even (em 1.2R)
+                            if with_be and not hit_be:
+                                if direction == "BUY" and h >= (entry + risk * 1.2): hit_be = True
+                                elif direction == "SELL" and l <= (entry - risk * 1.2): hit_be = True
 
-            triggered = False
-            win_no_be, loss_no_be = False, False
-            win_with_be, loss_with_be, hit_be = False, False, False
+                            if direction == "BUY":
+                                if hit_be and l <= entry: break # BE = 0R
+                                elif not hit_be and l <= sl: loss = True; break
+                                elif h >= tp: win = True; break
+                            else:
+                                if hit_be and h >= entry: break
+                                elif not hit_be and h >= sl: loss = True; break
+                                elif l <= tp: win = True; break
 
-            for h, l in zip(sim_slice_h, sim_slice_l):
-                if not triggered:
-                    if direction == "BUY" and l <= entry: triggered = True
-                    elif direction == "SELL" and h >= entry: triggered = True
-                    if not triggered: continue
+                        if triggered:
+                            if win: wins += 1
+                            elif loss: losses += 1
+                            elif hit_be and not win: be_count += 1
 
-                # Trilha Sem Break-Even
-                if not (win_no_be or loss_no_be):
-                    if direction == "BUY":
-                        if l <= sl: loss_no_be = True
-                        elif h >= tp: win_no_be = True
-                    else:
-                        if h >= sl: loss_no_be = True
-                        elif l <= tp: win_no_be = True
+                    total_resolved = wins + losses
+                    win_rate = int((wins / total_resolved) * 100) if total_resolved > 0 else 0
+                    net_r = round((wins * mult) - (losses * 1.0), 1)
+                    pnl = round(net_r * risk_per_trade, 2)
 
-                # Trilha Com Break-Even (em 1.2R)
-                if not (win_with_be or loss_with_be or hit_be):
-                    if not hit_be:
-                        if direction == "BUY" and h >= (entry + risk * 1.2): hit_be = True
-                        elif direction == "SELL" and l <= (entry - risk * 1.2): hit_be = True
+                    raio_x_results.append({
+                        "id": f"{entry_label}_{sweep_label}_{prof_key}_{'BE' if with_be else 'NOBE'}",
+                        "entry": "50% CE" if use_ce_50 else "Borda",
+                        "sweep": "Com Sweep" if req_sweep else "Sem Sweep",
+                        "profile": prof_label,
+                        "profile_key": prof_key,
+                        "with_be": with_be,
+                        "be_label": "Com BE" if with_be else "Sem BE",
+                        "setups": setups_count,
+                        "wins": wins,
+                        "losses": losses,
+                        "be_count": be_count,
+                        "win_rate": win_rate,
+                        "net_r": net_r,
+                        "pnl": pnl
+                    })
 
-                    if direction == "BUY":
-                        if hit_be and l <= entry: break
-                        elif not hit_be and l <= sl: loss_with_be = True; break
-                        elif h >= tp: win_with_be = True; break
-                    else:
-                        if hit_be and h >= entry: break
-                        elif not hit_be and h >= sl: loss_with_be = True; break
-                        elif l <= tp: win_with_be = True; break
+    # Ordena o Raio-X do melhor para o pior resultado por PnL e Net R
+    raio_x_results.sort(key=lambda x: (x['pnl'], x['win_rate']), reverse=True)
+    best = raio_x_results[0] if raio_x_results else None
 
-            if triggered:
-                if win_no_be: no_be[prof]["wins"] += 1
-                elif loss_no_be: no_be[prof]["losses"] += 1
-
-                if win_with_be: with_be[prof]["wins"] += 1
-                elif loss_with_be: with_be[prof]["losses"] += 1
-                elif hit_be and not win_with_be: with_be[prof]["be_count"] += 1
-
-    def build_stats(w, l, mult, be_cnt=0):
-        tot = w + l
-        rate = int((w / tot) * 100) if tot > 0 else 0
-        net_r = round((w * mult) - (l * 1.0), 1)
-        pnl = round(net_r * risk_per_trade, 2)
-        res = {"rate": rate, "wins": w, "losses": l, "net_r": net_r, "pnl": pnl}
-        if be_cnt > 0: res["be_count"] = be_cnt
-        return res
-
-    report_no_be = {
-        "sniper": build_stats(no_be["sniper"]["wins"], no_be["sniper"]["losses"], 4.0),
-        "tatico": build_stats(no_be["tatico"]["wins"], no_be["tatico"]["losses"], 2.5),
-        "guardiao": build_stats(no_be["guardiao"]["wins"], no_be["guardiao"]["losses"], 1.5)
-    }
-
-    report_with_be = {
-        "sniper": build_stats(with_be["sniper"]["wins"], with_be["sniper"]["losses"], 4.0, with_be["sniper"]["be_count"]),
-        "tatico": build_stats(with_be["tatico"]["wins"], with_be["tatico"]["losses"], 2.5, with_be["tatico"]["be_count"]),
-        "guardiao": build_stats(with_be["guardiao"]["wins"], with_be["guardiao"]["losses"], 1.5, with_be["guardiao"]["be_count"])
-    }
-
-    best_pnl = -99999
-    recommended_mode = "TACTICAL (COM BE)"
-    for rep, is_be in [(report_no_be, False), (report_with_be, True)]:
-        for p_name in ["guardiao", "tatico", "sniper"]:
-            pnl_val = rep[p_name]["pnl"]
-            if pnl_val > best_pnl:
-                best_pnl = pnl_val
-                p_display = "GUARDIAN" if p_name == "guardiao" else ("TACTICAL" if p_name == "tatico" else "SNIPER")
-                recommended_mode = f"{p_display} ({'COM BE' if is_be else 'SEM BE'})"
+    # Monta compatibilidade para as abas simples
+    def get_subset(use_ce, be):
+        sub = {}
+        for p_key in ['guardiao', 'tatico', 'sniper']:
+            match = next((r for r in raio_x_results if r['entry'] == ('50% CE' if use_ce else 'Borda') and r['with_be'] == be and r['profile_key'] == p_key and r['sweep'] == 'Sem Sweep'), None)
+            if match:
+                sub[p_key] = {"rate": match["win_rate"], "wins": match["wins"], "losses": match["losses"], "net_r": match["net_r"], "pnl": match["pnl"], "be_count": match["be_count"]}
+            else:
+                sub[p_key] = {"rate": 0, "wins": 0, "losses": 0, "net_r": 0, "pnl": 0}
+        return sub
 
     return {
         "timestamp": int(time.time()),
         "symbol": symbol,
         "days": days,
-        "setups": valid_setups,
+        "setups": len(all_fvgs),
         "base_risk": risk_per_trade,
         "strategy_info": {
-            "entry": "50% Consequent Encroachment" if use_ce_50 else "Borda do FVG",
-            "sessions": "Killzones Ativas" if use_session_filter else "24 Horas",
-            "cv_filter": "Barreiras de Absorção Ativas"
+            "entry": "Raio-X Matricial Completo",
+            "sessions": "Histórico Real (5 Dias)",
+            "cv_filter": "Filtro de Absorção Dinâmico"
         },
-        "without_be": report_no_be,
-        "with_be": report_with_be,
-        "sniper": report_with_be["sniper"],
-        "tatico": report_with_be["tatico"],
-        "guardiao": report_with_be["guardiao"],
-        "recommended": recommended_mode
+        "raio_x": raio_x_results,
+        "with_be": get_subset(use_ce=True, be=True),
+        "without_be": get_subset(use_ce=True, be=False),
+        "sniper": get_subset(use_ce=True, be=True)["sniper"],
+        "tatico": get_subset(use_ce=True, be=True)["tatico"],
+        "guardiao": get_subset(use_ce=True, be=True)["guardiao"],
+        "recommended": f"{best['profile']} ({best['entry']} | {best['sweep']} | {best['be_label']})" if best else "TACTICAL (50% CE)"
     }
 
 def main():
@@ -419,7 +410,7 @@ def main():
     active_mode = "BOTH"
     cached_settings = {}
 
-    sync.add_log(None, "Motor inicializado com controle manual/IA e Stop calibrado.", "INFO")
+    sync.add_log(None, "Motor conectado com Raio-X Geral e Backtest Cronológico.", "INFO")
 
     try:
         while True:
@@ -468,17 +459,7 @@ def main():
                             real_sym = engine.resolve_symbol(cat)
                             days = int(parts[2]) if len(parts) > 2 else 5
 
-                            is_auto = cached_settings.get("auto_profile_ia", False)
-                            scout_dir = scout.get_directive(cat)
-
-                            use_ce = scout_dir.get("use_ce_50", True) if is_auto else cached_settings.get("use_ce_50", True)
-                            req_sweep = scout_dir.get("require_sweep", False) if is_auto else cached_settings.get("require_sweep", False)
-                            use_sess = cached_settings.get("use_session_filter", True)
-
-                            rep = run_recent_backtest(
-                                engine, real_sym, days, risk_manager.risk_per_trade_usd,
-                                use_ce_50=use_ce, require_sweep=req_sweep, use_session_filter=use_sess
-                            )
+                            rep = run_recent_backtest(engine, real_sym, days, risk_manager.risk_per_trade_usd)
                             if rep:
                                 try: sync.client.table("copilot_status").update({"last_backtest": rep}).eq("id", 1).execute()
                                 except: pass
@@ -489,7 +470,6 @@ def main():
                             p = close_all_open_positions()
                             sync.add_log(None, f"EMERGÊNCIA: {c} ordens canceladas, {p} posições zeradas", "DANGER")
 
-                # Monta estatísticas com Scout & Estratégia Ativa
                 today_stats = get_today_performance(risk_base=risk_manager.risk_per_trade_usd)
                 today_stats["scout_directives"] = scout.active_directives
                 today_stats["is_auto_ai"] = bool(cached_settings.get("auto_profile_ia", False))
