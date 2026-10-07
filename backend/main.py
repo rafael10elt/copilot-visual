@@ -227,11 +227,6 @@ def get_today_performance(risk_base=50.0):
         }
 
 def run_recent_backtest(engine, symbol, days=5, risk_per_trade=50.0):
-    """
-    RAIO-X COMPLETO DO MERCADO:
-    Gera todas as combinações (CE 50% vs Borda, Com Sweep vs Sem Sweep, Com BE vs Sem BE)
-    para fornecer um panorama institucional preciso.
-    """
     if not symbol: return None
     total_m5 = int(days) * 240
     total_m1 = int(days) * 1440
@@ -255,7 +250,6 @@ def run_recent_backtest(engine, symbol, days=5, risk_per_trade=50.0):
     m1_lows = df_m1['low'].values
     m1_times = df_m1['time'].values
 
-    # Matriz de Estratégias a simular
     entry_modes = [("CE_50", True), ("BORDA", False)]
     sweep_modes = [("COM_SWEEP", True), ("SEM_SWEEP", False)]
     profiles = [("guardiao", 1.5, "GUARDIAN (1:1.5)"), ("tatico", 2.5, "TACTICAL (1:2.5)"), ("sniper", 4.0, "SNIPER (1:4.0)")]
@@ -270,7 +264,6 @@ def run_recent_backtest(engine, symbol, days=5, risk_per_trade=50.0):
                     setups_count = 0
 
                     for f in all_fvgs:
-                        # Filtro de Sweep opcional
                         if req_sweep and not f['has_sweep']:
                             continue
 
@@ -283,12 +276,13 @@ def run_recent_backtest(engine, symbol, days=5, risk_per_trade=50.0):
                         tp = entry + (risk * mult) if direction == "BUY" else entry - (risk * mult)
                         sl = entry - risk if direction == "BUY" else entry + risk
 
-                        # Validação de visão
-                        path_ok, _ = vision.validate_liquidity_path(df_m5, direction, entry, tp)
+                        # Contexto histórico pontual (sem viés de olhar o futuro)
+                        f_idx = f['index']
+                        df_context = df_m5.iloc[:f_idx+1]
+                        path_ok, _ = vision.validate_liquidity_path(df_context, direction, entry, tp)
                         if not path_ok:
                             continue
 
-                        # Procura o candle M1 imediatamente APÓS a formação do setup
                         start_idx = 0
                         for idx in range(len(m1_times)):
                             if m1_times[idx] >= f['raw_time']:
@@ -298,7 +292,6 @@ def run_recent_backtest(engine, symbol, days=5, risk_per_trade=50.0):
                         if start_idx == 0 or start_idx >= len(m1_times): continue
                         setups_count += 1
 
-                        # Janela de até 120 velas M1 (2 horas de operação)
                         sim_slice_h = m1_highs[start_idx : min(start_idx + 120, len(m1_highs))]
                         sim_slice_l = m1_lows[start_idx : min(start_idx + 120, len(m1_lows))]
 
@@ -311,13 +304,12 @@ def run_recent_backtest(engine, symbol, days=5, risk_per_trade=50.0):
                                 elif direction == "SELL" and h >= entry: triggered = True
                                 if not triggered: continue
 
-                            # Lógica Break-Even (em 1.2R)
                             if with_be and not hit_be:
                                 if direction == "BUY" and h >= (entry + risk * 1.2): hit_be = True
                                 elif direction == "SELL" and l <= (entry - risk * 1.2): hit_be = True
 
                             if direction == "BUY":
-                                if hit_be and l <= entry: break # BE = 0R
+                                if hit_be and l <= entry: break
                                 elif not hit_be and l <= sl: loss = True; break
                                 elif h >= tp: win = True; break
                             else:
@@ -352,11 +344,9 @@ def run_recent_backtest(engine, symbol, days=5, risk_per_trade=50.0):
                         "pnl": pnl
                     })
 
-    # Ordena o Raio-X do melhor para o pior resultado por PnL e Net R
     raio_x_results.sort(key=lambda x: (x['pnl'], x['win_rate']), reverse=True)
     best = raio_x_results[0] if raio_x_results else None
 
-    # Monta compatibilidade para as abas simples
     def get_subset(use_ce, be):
         sub = {}
         for p_key in ['guardiao', 'tatico', 'sniper']:

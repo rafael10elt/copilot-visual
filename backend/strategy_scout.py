@@ -1,4 +1,4 @@
-# strategy_scout.py — Agente de Inteligência Walk-Forward com Proteção de Stand-By e Break-Even
+# strategy_scout.py — Agente de Inteligência Walk-Forward com Histórico Cronológico
 import time
 import threading
 import MetaTrader5 as mt5
@@ -45,7 +45,7 @@ class StrategyScout:
             best_directive = self._evaluate_symbol_matrix(symbol, days, base_risk)
             if best_directive:
                 self.active_directives[category] = best_directive
-                status_trade = "AUTORIZADO" if best_directive["should_trade"] else "STAND-BY (MERCADO RUIM)"
+                status_trade = "AUTORIZADO" if best_directive["should_trade"] else "STAND-BY"
                 msg = (
                     f"DIRETRIZ {category}: {best_directive['recommended_profile'].upper()} [{status_trade}] | "
                     f"50%_CE={best_directive['use_ce_50']} | Sweep={best_directive['require_sweep']} | "
@@ -65,11 +65,14 @@ class StrategyScout:
             return None
 
         is_nasdaq = "US100" in symbol or "NAS" in symbol or "USTEC" in symbol
-        max_risk = 25.0 if is_nasdaq else 3.5
+        min_stop_points = 5.0 if is_nasdaq else 1.2
+        max_risk = 30.0 if is_nasdaq else 4.5
 
         detector = FVGDetector()
         vision = VisionLiquidityAnalyzer()
-        fvgs = detector.find_unmitigated_fvgs(df_m5, symbol)
+        
+        # USA TODOS OS SETUPS CRONOLÓGICOS (Fim do descarte indevido)
+        fvgs = detector.find_all_historical_fvgs(df_m5, symbol)
 
         m1_highs = df_m1['high'].values
         m1_lows = df_m1['low'].values
@@ -102,23 +105,28 @@ class StrategyScout:
 
                     direction = "BUY" if f['type'] == 'BULLISH' else "SELL"
                     entry = f['ce_50'] if comb["use_ce_50"] else (f['top'] if direction == "BUY" else f['bottom'])
-                    raw_risk = abs(entry - (f['bottom'] if direction == "BUY" else f['top'])) + (1.0 if is_nasdaq else 0.3)
-                    risk = min(max(raw_risk, 1.5 if is_nasdaq else 0.4), max_risk)
+
+                    raw_dist = abs(entry - (f['bottom'] if direction == "BUY" else f['top']))
+                    risk = min(max(raw_dist + (1.2 if is_nasdaq else 0.4), min_stop_points), max_risk)
 
                     tp = entry + (risk * mult) if direction == "BUY" else entry - (risk * mult)
                     sl = entry - risk if direction == "BUY" else entry + risk
 
-                    path_ok, _ = vision.validate_liquidity_path(df_m5, direction, entry, tp)
+                    # Avalia a visão considerando apenas o histórico até o nascimento daquele setup
+                    f_idx = f['index']
+                    df_context = df_m5.iloc[:f_idx+1]
+                    path_ok, _ = vision.validate_liquidity_path(df_context, direction, entry, tp)
                     if not path_ok:
                         continue
 
                     start_idx = 0
                     for idx in range(len(m1_times)):
                         if m1_times[idx] >= f['raw_time']:
-                            start_idx = idx
+                            start_idx = idx + 1
                             break
 
-                    # Janela de Resolução Realista: até 120 velas M1 (2 horas de operação)
+                    if start_idx == 0 or start_idx >= len(m1_times): continue
+
                     sim_h = m1_highs[start_idx : min(start_idx + 120, len(m1_highs))]
                     sim_l = m1_lows[start_idx : min(start_idx + 120, len(m1_lows))]
 
@@ -129,29 +137,20 @@ class StrategyScout:
                         if not triggered:
                             if direction == "BUY" and l <= entry: triggered = True
                             elif direction == "SELL" and h >= entry: triggered = True
-                            continue
+                            if not triggered: continue
 
-                        # Break-Even real: move stop para o zero a zero ao atingir 1.2R
                         if not hit_be:
-                            if direction == "BUY" and h >= (entry + risk * 1.2):
-                                sl = entry
-                                hit_be = True
-                            elif direction == "SELL" and l <= (entry - risk * 1.2):
-                                sl = entry
-                                hit_be = True
+                            if direction == "BUY" and h >= (entry + risk * 1.2): hit_be = True
+                            elif direction == "SELL" and l <= (entry - risk * 1.2): hit_be = True
 
                         if direction == "BUY":
-                            if l <= sl:
-                                if hit_be: be_exits += 1
-                                else: loss = True
-                                break
-                            if h >= tp: win = True; break
+                            if hit_be and l <= entry: be_exits += 1; break
+                            elif not hit_be and l <= sl: loss = True; break
+                            elif h >= tp: win = True; break
                         else:
-                            if h >= sl:
-                                if hit_be: be_exits += 1
-                                else: loss = True
-                                break
-                            if l <= tp: win = True; break
+                            if hit_be and h >= entry: be_exits += 1; break
+                            elif not hit_be and h >= sl: loss = True; break
+                            elif l <= tp: win = True; break
 
                     if triggered:
                         if win:
@@ -163,7 +162,7 @@ class StrategyScout:
                             max_consec_losses = max(max_consec_losses, current_consec_losses)
 
                 total_resolved = wins + losses
-                if total_resolved < 2:
+                if total_resolved < 3:
                     continue
 
                 win_rate = (wins / total_resolved) * 100.0 if total_resolved > 0 else 0.0
@@ -183,7 +182,7 @@ class StrategyScout:
                         "win_rate": int(win_rate),
                         "trades": total_resolved + be_exits,
                         "net_r": round(net_r, 1),
-                        "should_trade": prop_score >= 0.0  # Só autoriza se a matemática estiver positiva
+                        "should_trade": prop_score >= 0.0
                     }
 
         return best_candidate
