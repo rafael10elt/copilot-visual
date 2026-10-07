@@ -82,25 +82,27 @@ export default function App() {
     });
   };
 
-  const handleRunBacktest = async (days = 2, asset = 'US100') => {
+ const handleRunBacktest = async (days = 2, asset = 'US100') => {
     const symbolTarget = asset === 'US100' ? 'US100.cash' : 'XAUUSD';
     
     // Abre o modal de imediato em modo de carregamento
     setIsBacktestLoading(true);
     setShowReportModal(true);
 
+    // Envia o comando para o notebook
     await supabase.from('copilot_logs').insert({
       symbol: symbolTarget,
       message: `COMMAND: RUN_BACKTEST:${symbolTarget}:${days}`,
       level: "INFO"
     });
 
-    // Fallback: faz polling a cada 1.5s durante 8s para garantir a resposta caso o websocket falhe
+    // Polling inteligente a cada 1 segundo (com limite de 20 segundos)
     let attempts = 0;
     if (pollTimerRef.current) clearInterval(pollTimerRef.current);
 
     pollTimerRef.current = setInterval(async () => {
       attempts++;
+      
       const { data } = await supabase.from('copilot_logs')
         .select('*')
         .like('message', 'BACKTEST_RESULT:%')
@@ -113,14 +115,17 @@ export default function App() {
           setLatestBacktest(parsed);
           setIsBacktestLoading(false);
           clearInterval(pollTimerRef.current);
-        } catch {}
+          return;
+        } catch (err) {
+          console.error("Erro ao parsear backtest:", err);
+        }
       }
 
-      if (attempts > 6) {
+      if (attempts >= 20) {
         setIsBacktestLoading(false);
         clearInterval(pollTimerRef.current);
       }
-    }, 1500);
+    }, 1000);
   };
 
   const handleClearLogs = async () => {

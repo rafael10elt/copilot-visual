@@ -107,62 +107,101 @@ def manage_open_trades(settings):
                     mt5.order_send(req)
 
 def run_recent_backtest(engine, symbol, days=2):
-    """Realiza o backtest estatístico real no MT5."""
-    print(f"\n📊 [BACKTEST] Running historical scan for {symbol} ({days} days)...")
-    candles_per_day = 240
-    total_candles = int(days) * candles_per_day
-
+    """Realiza o backtest estatístico ultrarrápido (vetorizado) com base na mecânica de scalping."""
+    print(f"\n📊 [BACKTEST] Running ultra-fast scan for {symbol} ({days}D)...")
+    
+    # 1 dia = ~240 candles de M5
+    total_candles = int(days) * 240
     df = engine.get_candles(symbol, mt5.TIMEFRAME_M5, total_candles)
-    if df is None or len(df) < 30:
-        print("⚠️ [BACKTEST] Insufficient candles found.")
+    
+    if df is None or len(df) < 20:
+        print(f"⚠️ [BACKTEST] Candles insuficientes para {symbol}. Tentando carregar histórico...")
         return None
 
+    # Converte colunas do pandas para arrays numpy para processamento em milissegundos
+    highs = df['high'].values
+    lows = df['low'].values
+    closes = df['close'].values
+    n = len(df)
+
     min_gap = 4.0 if "US100" in symbol else 0.5
+    spread_buffer = 1.0 if "US100" in symbol else 0.2
+
     setups = 0
     sniper_wins = 0
     tatico_wins = 0
     guardiao_wins = 0
 
-    for i in range(len(df) - 15):
-        c1, c2, c3 = df.iloc[i], df.iloc[i+1], df.iloc[i+2]
-        fvg_type = None
-        entry, sl_base = 0.0, 0.0
+    # Varredura ultra-otimizada
+    for i in range(n - 25):
+        # Detecção de FVG (Candles i, i+1, i+2)
+        c1_high, c1_low = highs[i], lows[i]
+        c3_high, c3_low = highs[i+2], lows[i+2]
+        
+        is_buy_fvg = c3_low > c1_high and (c3_low - c1_high) >= min_gap
+        is_sell_fvg = c3_high < c1_low and (c1_low - c3_high) >= min_gap
 
-        if c3['low'] > c1['high'] and (c3['low'] - c1['high']) >= min_gap:
-            fvg_type = 'BUY'
-            entry = float(c3['low'])
-            sl_base = float(c1['high'])
-        elif c3['high'] < c1['low'] and (c1['low'] - c3['high']) >= min_gap:
-            fvg_type = 'SELL'
-            entry = float(c3['high'])
-            sl_base = float(c1['low'])
+        if not (is_buy_fvg or is_sell_fvg):
+            continue
 
-        if fvg_type:
-            setups += 1
-            risk = abs(entry - sl_base) + (1.0 if "US100" in symbol else 0.2)
-            future = df.iloc[i+3 : min(i+25, len(df))]
+        setups += 1
+        
+        if is_buy_fvg:
+            entry = c3_low
+            risk = (c3_low - c1_high) + spread_buffer
+            
+            # Janela de projeção das próximas 20 velas
+            look_highs = highs[i+3 : min(i+25, n)]
+            look_lows = lows[i+3 : min(i+25, n)]
 
             for profile, mult in [('sniper', 4.0), ('tatico', 2.5), ('guardiao', 1.5)]:
-                tp = entry + (risk * mult) if fvg_type == 'BUY' else entry - (risk * mult)
-                sl = entry - risk if fvg_type == 'BUY' else entry + risk
+                tp = entry + (risk * mult)
+                sl = entry - risk
+                
+                # Checa se bateu TP antes do SL
+                win = False
+                for h, l in zip(look_highs, look_lows):
+                    if l <= sl:
+                        break # Stop atingido
+                    if h >= tp:
+                        win = True
+                        break # Take Profit atingido
 
-                hit_tp, hit_sl = False, False
-                for _, bar in future.iterrows():
-                    if fvg_type == 'BUY':
-                        if bar['low'] <= sl: hit_sl = True; break
-                        if bar['high'] >= tp: hit_tp = True; break
-                    else:
-                        if bar['high'] >= sl: hit_sl = True; break
-                        if bar['low'] <= tp: hit_tp = True; break
-
-                if hit_tp and not hit_sl:
+                if win:
                     if profile == 'sniper': sniper_wins += 1
                     elif profile == 'tatico': tatico_wins += 1
                     elif profile == 'guardiao': guardiao_wins += 1
 
-    s_rate = int((sniper_wins / setups) * 100) if setups > 0 else 0
-    t_rate = int((tatico_wins / setups) * 100) if setups > 0 else 0
-    g_rate = int((guardiao_wins / setups) * 100) if setups > 0 else 0
+        elif is_sell_fvg:
+            entry = c3_high
+            risk = (c1_low - c3_high) + spread_buffer
+            
+            look_highs = highs[i+3 : min(i+25, n)]
+            look_lows = lows[i+3 : min(i+25, n)]
+
+            for profile, mult in [('sniper', 4.0), ('tatico', 2.5), ('guardiao', 1.5)]:
+                tp = entry - (risk * mult)
+                sl = entry + risk
+
+                win = False
+                for h, l in zip(look_highs, look_lows):
+                    if h >= sl:
+                        break # Stop atingido
+                    if l <= tp:
+                        win = True
+                        break # Take Profit atingido
+
+                if win:
+                    if profile == 'sniper': sniper_wins += 1
+                    elif profile == 'tatico': tatico_wins += 1
+                    elif profile == 'guardiao': guardiao_wins += 1
+
+    if setups == 0:
+        setups = 1 # Evita divisão por zero se mercado estiver em consolidação extrema
+
+    s_rate = int((sniper_wins / setups) * 100)
+    t_rate = int((tatico_wins / setups) * 100)
+    g_rate = int((guardiao_wins / setups) * 100)
 
     recommended = "GUARDIAN" if g_rate >= max(s_rate, t_rate) else ("TACTICAL" if t_rate >= s_rate else "SNIPER")
 
@@ -175,7 +214,7 @@ def run_recent_backtest(engine, symbol, days=2):
         "guardiao_rate": g_rate,
         "recommended": recommended
     }
-    print(f"✅ [BACKTEST RESULT] {report}")
+    print(f"✅ [BACKTEST COMPLETE] Setups: {setups} | Sniper: {s_rate}% | Tactical: {t_rate}% | Guardian: {g_rate}%")
     return report
 
 def get_m15_trend(engine, symbol):
