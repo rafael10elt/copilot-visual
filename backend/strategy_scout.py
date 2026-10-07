@@ -1,4 +1,4 @@
-# strategy_scout.py — Agente de Inteligência Walk-Forward com Histórico Cronológico
+# strategy_scout.py — Agente de Inteligência Walk-Forward com Regras Rígidas de Mesa
 import time
 import threading
 import MetaTrader5 as mt5
@@ -32,7 +32,7 @@ class StrategyScout:
             try:
                 self.run_full_evaluation()
             except Exception as e:
-                print(f"⚠️ [STRATEGY SCOUT] Falha na rodada de calibração: {e}")
+                print(f"⚠️ [STRATEGY SCOUT] Falha na calibração: {e}")
 
             time.sleep(self.interval)
 
@@ -70,8 +70,6 @@ class StrategyScout:
 
         detector = FVGDetector()
         vision = VisionLiquidityAnalyzer()
-        
-        # USA TODOS OS SETUPS CRONOLÓGICOS (Fim do descarte indevido)
         fvgs = detector.find_all_historical_fvgs(df_m5, symbol)
 
         m1_highs = df_m1['high'].values
@@ -96,7 +94,25 @@ class StrategyScout:
                 max_consec_losses = 0
                 current_consec_losses = 0
 
+                bot_busy_until_m1_idx = -1
+                current_sim_day = None
+                daily_trades = 0
+                daily_r = 0.0
+                day_locked = False
+
                 for f in fvgs:
+                    f_time = f['raw_time']
+                    f_date = f_time.strftime('%Y-%m-%d')
+
+                    if f_date != current_sim_day:
+                        current_sim_day = f_date
+                        daily_trades = 0
+                        daily_r = 0.0
+                        day_locked = False
+
+                    if day_locked or daily_trades >= 5:
+                        continue
+
                     if not InstitutionalSessionFilter.is_session_active(symbol, f['raw_time']):
                         continue
 
@@ -112,7 +128,6 @@ class StrategyScout:
                     tp = entry + (risk * mult) if direction == "BUY" else entry - (risk * mult)
                     sl = entry - risk if direction == "BUY" else entry + risk
 
-                    # Avalia a visão considerando apenas o histórico até o nascimento daquele setup
                     f_idx = f['index']
                     df_context = df_m5.iloc[:f_idx+1]
                     path_ok, _ = vision.validate_liquidity_path(df_context, direction, entry, tp)
@@ -126,14 +141,17 @@ class StrategyScout:
                             break
 
                     if start_idx == 0 or start_idx >= len(m1_times): continue
+                    if start_idx <= bot_busy_until_m1_idx: continue
 
                     sim_h = m1_highs[start_idx : min(start_idx + 120, len(m1_highs))]
                     sim_l = m1_lows[start_idx : min(start_idx + 120, len(m1_lows))]
 
                     triggered = False
                     win, loss, hit_be = False, False, False
+                    trade_res_idx = start_idx
 
-                    for h, l in zip(sim_h, sim_l):
+                    for step, (h, l) in enumerate(zip(sim_h, sim_l)):
+                        cur_idx = start_idx + step
                         if not triggered:
                             if direction == "BUY" and l <= entry: triggered = True
                             elif direction == "SELL" and h >= entry: triggered = True
@@ -144,25 +162,34 @@ class StrategyScout:
                             elif direction == "SELL" and l <= (entry - risk * 1.2): hit_be = True
 
                         if direction == "BUY":
-                            if hit_be and l <= entry: be_exits += 1; break
-                            elif not hit_be and l <= sl: loss = True; break
-                            elif h >= tp: win = True; break
+                            if l <= sl and h >= tp: loss = True; trade_res_idx = cur_idx; break
+                            elif hit_be and l <= entry: be_exits += 1; trade_res_idx = cur_idx; break
+                            elif not hit_be and l <= sl: loss = True; trade_res_idx = cur_idx; break
+                            elif h >= tp: win = True; trade_res_idx = cur_idx; break
                         else:
-                            if hit_be and h >= entry: be_exits += 1; break
-                            elif not hit_be and h >= sl: loss = True; break
-                            elif l <= tp: win = True; break
+                            if h >= sl and l <= tp: loss = True; trade_res_idx = cur_idx; break
+                            elif hit_be and h >= entry: be_exits += 1; trade_res_idx = cur_idx; break
+                            elif not hit_be and h >= sl: loss = True; trade_res_idx = cur_idx; break
+                            elif l <= tp: win = True; trade_res_idx = cur_idx; break
 
                     if triggered:
+                        daily_trades += 1
+                        bot_busy_until_m1_idx = trade_res_idx + 10
                         if win:
                             wins += 1
+                            daily_r += mult
                             current_consec_losses = 0
                         elif loss:
                             losses += 1
+                            daily_r -= 1.0
                             current_consec_losses += 1
                             max_consec_losses = max(max_consec_losses, current_consec_losses)
 
+                        if daily_r >= 3.5 or daily_r <= -2.0:
+                            day_locked = True
+
                 total_resolved = wins + losses
-                if total_resolved < 3:
+                if total_resolved < 2:
                     continue
 
                 win_rate = (wins / total_resolved) * 100.0 if total_resolved > 0 else 0.0

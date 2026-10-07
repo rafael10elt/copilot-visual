@@ -1,4 +1,4 @@
-# main.py — Orquestrador HFT com Backtest da Sessão Atual (Hoje) e Cooldown Realista
+# main.py — Orquestrador HFT com Expectativa Realista Rígida de Mesa Proprietária
 import time
 import json
 from datetime import datetime, timedelta
@@ -228,17 +228,18 @@ def get_today_performance(risk_base=50.0):
 
 def run_recent_backtest(engine, symbol, days=0, risk_per_trade=50.0):
     """
-    BACKTEST DE EXPECTATIVA REALISTA (COM SUPORTE À SESSÃO ATUAL - HOJE):
-    - Se days == 0: Avalia estritamente desde 00:00 do broker de hoje até o candle ao vivo.
-    - Aplica Cooldown Pós-Trade (5 min) para evitar micro-entradas repetidas.
-    - Aplica Fricção de Spread + Slippage + Taxas FTMO.
+    BACKTEST DE EXPECTATIVA REALISTA RIGOROSA:
+    1. Execução Sequencial Estrita (Zero sobreposição).
+    2. Teto Operacional: Máximo 4 a 5 trades por sessão/dia.
+    3. Trava de Meta Diária (+3.0R) e Trava de Perda Diária (-2.0R).
+    4. Penetração Estrita de Spread para preenchimento.
+    5. Pessimismo Intrabar em caso de conflito no mesmo candle.
     """
     if not symbol: return None
 
     tick_ref = mt5.symbol_info_tick(symbol)
     broker_now = datetime.fromtimestamp(tick_ref.time) if tick_ref else datetime.now()
 
-    # Cálculo da janela de candles
     if days == 0:
         start_of_day = datetime(broker_now.year, broker_now.month, broker_now.day, 0, 0, 0)
         minutes_elapsed = max(60, int((broker_now - start_of_day).total_seconds() / 60))
@@ -262,11 +263,10 @@ def run_recent_backtest(engine, symbol, days=0, risk_per_trade=50.0):
     point = info.point if info else 0.01
     spread_pts = (info.spread * point) if (info and info.spread > 0) else (1.5 if is_nasdaq else 0.25)
     slippage_pts = 0.8 if is_nasdaq else 0.15
-    commission_r = 0.04  # 4% do risco gasto em taxa por trade
+    commission_r = 0.04
 
     detector = FVGDetector()
     vision = VisionLiquidityAnalyzer()
-    
     all_fvgs = detector.find_all_historical_fvgs(df_m5, symbol)
 
     m1_highs = df_m1['high'].values
@@ -288,10 +288,27 @@ def run_recent_backtest(engine, symbol, days=0, risk_per_trade=50.0):
                     trades_executed = 0
 
                     bot_busy_until_m1_idx = -1
+                    current_sim_day = None
+                    daily_trade_count = 0
+                    daily_net_r = 0.0
+                    day_locked = False
 
                     for f in all_fvgs:
-                        # Se for teste da sessão atual, ignora dias anteriores
-                        if days == 0 and f['raw_time'] < start_of_day:
+                        f_time = f['raw_time']
+                        f_date_str = f_time.strftime('%Y-%m-%d')
+
+                        if days == 0 and f_time < start_of_day:
+                            continue
+
+                        # Controle de Virada de Dia
+                        if f_date_str != current_sim_day:
+                            current_sim_day = f_date_str
+                            daily_trade_count = 0
+                            daily_net_r = 0.0
+                            day_locked = False
+
+                        # TRAVA INSTITUCIONAL DE MESA: Se atingiu meta diária (+3.5R) ou limite (-2R), descansa o restante do dia
+                        if day_locked or daily_trade_count >= 5:
                             continue
 
                         if req_sweep and not f['has_sweep']:
@@ -323,7 +340,7 @@ def run_recent_backtest(engine, symbol, days=0, risk_per_trade=50.0):
                         if start_idx == 0 or start_idx >= len(m1_times): 
                             continue
 
-                        # TRAVA SEQUENCIAL COM COOLDOWN
+                        # Trava Sequencial
                         if start_idx <= bot_busy_until_m1_idx:
                             continue
 
@@ -335,6 +352,9 @@ def run_recent_backtest(engine, symbol, days=0, risk_per_trade=50.0):
                         win, loss, hit_be = False, False, False
                         trade_resolved_idx = start_idx
 
+                        # PREENCHIMENTO ESTRITO COM FRICÇÃO REAL
+                        # Para entrar numa compra Limit, o preço precisa ter caído abaixo do spread
+                        strict_fill_penetration = spread_pts * 0.4
                         if direction == "BUY":
                             effective_entry = raw_entry + spread_pts + slippage_pts
                             effective_tp = tp
@@ -348,52 +368,70 @@ def run_recent_backtest(engine, symbol, days=0, risk_per_trade=50.0):
                             current_m1_idx = start_idx + step
 
                             if not triggered:
-                                if direction == "BUY" and l <= raw_entry: 
+                                if direction == "BUY" and l <= (raw_entry - strict_fill_penetration): 
                                     triggered = True
-                                elif direction == "SELL" and h >= raw_entry: 
+                                elif direction == "SELL" and h >= (raw_entry + strict_fill_penetration): 
                                     triggered = True
                                 if not triggered: 
                                     continue
 
+                            # Lógica Break-Even
                             if with_be and not hit_be:
-                                if direction == "BUY" and h >= (effective_entry + risk * 1.2): 
-                                    hit_be = True
-                                elif direction == "SELL" and l <= (effective_entry - risk * 1.2): 
-                                    hit_be = True
+                                if direction == "BUY" and h >= (effective_entry + risk * 1.2): hit_be = True
+                                elif direction == "SELL" and l <= (effective_entry - risk * 1.2): hit_be = True
 
+                            # PESSIMISMO INTRABAR: Se tocou ambos no mesmo candle, assume STOP
                             if direction == "BUY":
-                                if hit_be and l <= effective_entry:
+                                hit_tp = (h >= effective_tp)
+                                hit_sl = (l <= effective_sl) if not hit_be else (l <= effective_entry)
+                                
+                                if hit_sl and hit_tp:
+                                    loss = True if not hit_be else False
                                     trade_resolved_idx = current_m1_idx
                                     break
-                                elif not hit_be and l <= effective_sl:
-                                    loss = True
+                                elif hit_sl:
+                                    loss = True if not hit_be else False
                                     trade_resolved_idx = current_m1_idx
                                     break
-                                elif h >= effective_tp:
+                                elif hit_tp:
                                     win = True
                                     trade_resolved_idx = current_m1_idx
                                     break
                             else:
-                                if hit_be and h >= effective_entry:
+                                hit_tp = (l <= effective_tp)
+                                hit_sl = (h >= effective_sl) if not hit_be else (h >= effective_entry)
+                                
+                                if hit_sl and hit_tp:
+                                    loss = True if not hit_be else False
                                     trade_resolved_idx = current_m1_idx
                                     break
-                                elif not hit_be and h >= effective_sl:
-                                    loss = True
+                                elif hit_sl:
+                                    loss = True if not hit_be else False
                                     trade_resolved_idx = current_m1_idx
                                     break
-                                elif l <= effective_tp:
+                                elif hit_tp:
                                     win = True
                                     trade_resolved_idx = current_m1_idx
                                     break
 
                         if triggered:
                             trades_executed += 1
-                            # COOLDOWN REALISTA: fica ocupado até o trade fechar + 5 minutos de M1
-                            bot_busy_until_m1_idx = trade_resolved_idx + 5
+                            daily_trade_count += 1
+                            # Cooldown institucional de 10 minutos após o encerramento do trade
+                            bot_busy_until_m1_idx = trade_resolved_idx + 10
 
-                            if win: wins += 1
-                            elif loss: losses += 1
-                            elif hit_be and not win: be_count += 1
+                            if win:
+                                wins += 1
+                                daily_net_r += mult
+                            elif loss:
+                                losses += 1
+                                daily_net_r -= 1.0
+                            elif hit_be and not win:
+                                be_count += 1
+
+                            # Trava de Meta / Limite do Dia
+                            if daily_net_r >= 3.5 or daily_net_r <= -2.0:
+                                day_locked = True
 
                     total_resolved = wins + losses
                     win_rate = int((wins / total_resolved) * 100) if total_resolved > 0 else 0
@@ -443,8 +481,8 @@ def run_recent_backtest(engine, symbol, days=0, risk_per_trade=50.0):
         "trades_executed": best['trades_executed'] if best else 0,
         "base_risk": risk_per_trade,
         "strategy_info": {
-            "mode": "Execução Sequencial (1 Trade por Vez)",
-            "frictions": f"Spread ({spread_pts:.2f}) + Slippage + Comissões",
+            "mode": "Execução Sequencial (Max 5 Trades/Dia)",
+            "frictions": f"Spread ({spread_pts:.2f}) + Slippage + Trava Meta/Loss",
             "context": "Sessão Atual (Hoje)" if days == 0 else f"Histórico Real {days}D"
         },
         "raio_x": raio_x_results,
@@ -479,7 +517,7 @@ def main():
     active_mode = "BOTH"
     cached_settings = {}
 
-    sync.add_log(None, "Motor conectado com Suporte à Sessão Atual (Hoje).", "INFO")
+    sync.add_log(None, "Motor conectado com Expectativa Realista Rígida.", "INFO")
 
     try:
         while True:
