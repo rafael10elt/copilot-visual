@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { createClient } from '@supabase/supabase-js';
 import { Zap, LayoutDashboard, Sliders, ScrollText, Volume2, VolumeX } from 'lucide-react';
 import Dashboard from './components/Dashboard';
@@ -16,9 +16,11 @@ export default function App() {
   const [logs, setLogs] = useState([]);
   const [soundEnabled, setSoundEnabled] = useState(false);
 
-  // Estados do Modal de Relatório do Backtest
+  // Estados do Modal e Backtest
   const [latestBacktest, setLatestBacktest] = useState(null);
   const [showReportModal, setShowReportModal] = useState(false);
+  const [isBacktestLoading, setIsBacktestLoading] = useState(false);
+  const pollTimerRef = useRef(null);
 
   useEffect(() => {
     supabase.from('copilot_status').select('*').eq('id', 1).single()
@@ -31,7 +33,6 @@ export default function App() {
       .then(r => {
         if (r.data) {
           setLogs(r.data);
-          // Procura o último relatório de backtest no histórico
           const reportLog = r.data.find(l => l.message && l.message.startsWith('BACKTEST_RESULT:'));
           if (reportLog) {
             try {
@@ -48,12 +49,14 @@ export default function App() {
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'copilot_logs' }, p => {
         setLogs(prev => [p.new, ...prev.slice(0, 45)]);
 
-        // Se chegar o resultado do Backtest em tempo real, abre o modal!
+        // Se chegar o resultado do Backtest via Realtime
         if (p.new.message && p.new.message.startsWith('BACKTEST_RESULT:')) {
           try {
             const parsed = JSON.parse(p.new.message.replace('BACKTEST_RESULT:', ''));
             setLatestBacktest(parsed);
-            setShowReportModal(true); // Abre o modal automaticamente!
+            setIsBacktestLoading(false);
+            setShowReportModal(true);
+            if (pollTimerRef.current) clearInterval(pollTimerRef.current);
           } catch {}
         }
 
@@ -61,7 +64,10 @@ export default function App() {
       })
       .subscribe();
 
-    return () => supabase.removeChannel(channel);
+    return () => {
+      supabase.removeChannel(channel);
+      if (pollTimerRef.current) clearInterval(pollTimerRef.current);
+    };
   }, [soundEnabled]);
 
   const handleUpdateSettings = async (newFields) => {
@@ -78,11 +84,43 @@ export default function App() {
 
   const handleRunBacktest = async (days = 2, asset = 'US100') => {
     const symbolTarget = asset === 'US100' ? 'US100.cash' : 'XAUUSD';
+    
+    // Abre o modal de imediato em modo de carregamento
+    setIsBacktestLoading(true);
+    setShowReportModal(true);
+
     await supabase.from('copilot_logs').insert({
       symbol: symbolTarget,
       message: `COMMAND: RUN_BACKTEST:${symbolTarget}:${days}`,
       level: "INFO"
     });
+
+    // Fallback: faz polling a cada 1.5s durante 8s para garantir a resposta caso o websocket falhe
+    let attempts = 0;
+    if (pollTimerRef.current) clearInterval(pollTimerRef.current);
+
+    pollTimerRef.current = setInterval(async () => {
+      attempts++;
+      const { data } = await supabase.from('copilot_logs')
+        .select('*')
+        .like('message', 'BACKTEST_RESULT:%')
+        .order('created_at', { ascending: false })
+        .limit(1);
+
+      if (data && data.length > 0) {
+        try {
+          const parsed = JSON.parse(data[0].message.replace('BACKTEST_RESULT:', ''));
+          setLatestBacktest(parsed);
+          setIsBacktestLoading(false);
+          clearInterval(pollTimerRef.current);
+        } catch {}
+      }
+
+      if (attempts > 6) {
+        setIsBacktestLoading(false);
+        clearInterval(pollTimerRef.current);
+      }
+    }, 1500);
   };
 
   const handleClearLogs = async () => {
@@ -162,6 +200,7 @@ export default function App() {
             latestBacktest={latestBacktest}
             showReportModal={showReportModal}
             setShowReportModal={setShowReportModal}
+            isBacktestLoading={isBacktestLoading}
           />
         )}
         {tab === 'controls' && (

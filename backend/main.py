@@ -9,7 +9,6 @@ from supabase_client import SupabaseSync
 ROBOT_MAGIC = 777999
 
 def get_best_filling_mode(symbol):
-    """Detects whether broker/FTMO supports IOC, FOK, or RETURN for the asset."""
     info = mt5.symbol_info(symbol)
     if not info:
         return mt5.ORDER_FILLING_IOC
@@ -21,7 +20,6 @@ def get_best_filling_mode(symbol):
     return mt5.ORDER_FILLING_RETURN
 
 def send_limit_order(symbol, action, entry_price, sl, tp, lot_size):
-    """Sends Buy Limit or Sell Limit order to MT5."""
     order_type = mt5.ORDER_TYPE_BUY_LIMIT if action == "BUY_LIMIT" else mt5.ORDER_TYPE_SELL_LIMIT
     filling = get_best_filling_mode(symbol)
 
@@ -46,7 +44,6 @@ def send_limit_order(symbol, action, entry_price, sl, tp, lot_size):
     return True
 
 def cancel_all_pending_orders():
-    """Cancels all pending orders placed by the robot."""
     orders = mt5.orders_get()
     if not orders:
         return 0
@@ -60,7 +57,6 @@ def cancel_all_pending_orders():
     return cancelled
 
 def close_all_open_positions():
-    """Closes all open positions placed by the robot at market price."""
     positions = mt5.positions_get()
     if not positions:
         return 0
@@ -87,7 +83,6 @@ def close_all_open_positions():
     return closed
 
 def manage_open_trades(settings):
-    """Active position management: Break-even and Trailing Stop on M1."""
     positions = mt5.positions_get()
     if not positions:
         return
@@ -100,35 +95,26 @@ def manage_open_trades(settings):
         entry_price = p.price_open
         sl = p.sl
 
-        # 1. Break-even logic (move SL to entry price once trade moves in profit)
         if settings.get("breakeven_enabled"):
             buffer = 2.0 if "US100" in p.symbol else 0.5
             if p.type == mt5.POSITION_TYPE_BUY:
                 if current_price >= (entry_price + buffer) and sl < entry_price:
-                    req = {
-                        "action": mt5.TRADE_ACTION_SLTP,
-                        "position": p.ticket,
-                        "sl": float(entry_price + 0.1),
-                        "tp": p.tp
-                    }
+                    req = {"action": mt5.TRADE_ACTION_SLTP, "position": p.ticket, "sl": float(entry_price + 0.1), "tp": p.tp}
                     mt5.order_send(req)
             elif p.type == mt5.POSITION_TYPE_SELL:
                 if current_price <= (entry_price - buffer) and sl > entry_price:
-                    req = {
-                        "action": mt5.TRADE_ACTION_SLTP,
-                        "position": p.ticket,
-                        "sl": float(entry_price - 0.1),
-                        "tp": p.tp
-                    }
+                    req = {"action": mt5.TRADE_ACTION_SLTP, "position": p.ticket, "sl": float(entry_price - 0.1), "tp": p.tp}
                     mt5.order_send(req)
 
 def run_recent_backtest(engine, symbol, days=2):
-    """Performs statistical backtest and returns structured JSON for the Web Modal."""
+    """Realiza o backtest estatístico real no MT5."""
+    print(f"\n📊 [BACKTEST] Running historical scan for {symbol} ({days} days)...")
     candles_per_day = 240
     total_candles = int(days) * candles_per_day
 
     df = engine.get_candles(symbol, mt5.TIMEFRAME_M5, total_candles)
-    if df is None or len(df) < 50:
+    if df is None or len(df) < 30:
+        print("⚠️ [BACKTEST] Insufficient candles found.")
         return None
 
     min_gap = 4.0 if "US100" in symbol else 0.5
@@ -137,7 +123,7 @@ def run_recent_backtest(engine, symbol, days=2):
     tatico_wins = 0
     guardiao_wins = 0
 
-    for i in range(len(df) - 20):
+    for i in range(len(df) - 15):
         c1, c2, c3 = df.iloc[i], df.iloc[i+1], df.iloc[i+2]
         fvg_type = None
         entry, sl_base = 0.0, 0.0
@@ -154,7 +140,7 @@ def run_recent_backtest(engine, symbol, days=2):
         if fvg_type:
             setups += 1
             risk = abs(entry - sl_base) + (1.0 if "US100" in symbol else 0.2)
-            future = df.iloc[i+3 : min(i+30, len(df))]
+            future = df.iloc[i+3 : min(i+25, len(df))]
 
             for profile, mult in [('sniper', 4.0), ('tatico', 2.5), ('guardiao', 1.5)]:
                 tp = entry + (risk * mult) if fvg_type == 'BUY' else entry - (risk * mult)
@@ -163,19 +149,11 @@ def run_recent_backtest(engine, symbol, days=2):
                 hit_tp, hit_sl = False, False
                 for _, bar in future.iterrows():
                     if fvg_type == 'BUY':
-                        if bar['low'] <= sl:
-                            hit_sl = True
-                            break
-                        if bar['high'] >= tp:
-                            hit_tp = True
-                            break
+                        if bar['low'] <= sl: hit_sl = True; break
+                        if bar['high'] >= tp: hit_tp = True; break
                     else:
-                        if bar['high'] >= sl:
-                            hit_sl = True
-                            break
-                        if bar['low'] <= tp:
-                            hit_tp = True
-                            break
+                        if bar['high'] >= sl: hit_sl = True; break
+                        if bar['low'] <= tp: hit_tp = True; break
 
                 if hit_tp and not hit_sl:
                     if profile == 'sniper': sniper_wins += 1
@@ -188,7 +166,7 @@ def run_recent_backtest(engine, symbol, days=2):
 
     recommended = "GUARDIAN" if g_rate >= max(s_rate, t_rate) else ("TACTICAL" if t_rate >= s_rate else "SNIPER")
 
-    report_payload = {
+    report = {
         "symbol": symbol,
         "days": days,
         "setups": setups,
@@ -197,16 +175,15 @@ def run_recent_backtest(engine, symbol, days=2):
         "guardiao_rate": g_rate,
         "recommended": recommended
     }
-    return report_payload
+    print(f"✅ [BACKTEST RESULT] {report}")
+    return report
 
 def get_m15_trend(engine, symbol):
     df_m15 = engine.get_candles(symbol, mt5.TIMEFRAME_M15, 20)
-    if df_m15 is None:
-        return "NEUTRAL"
+    if df_m15 is None: return "NEUTRAL"
     return "UPTREND" if df_m15.iloc[-1]['close'] > df_m15.iloc[0]['close'] else "DOWNTREND"
 
 def is_fvg_close_enough(current_price, entry_price, tp_price, action, symbol):
-    """Proximity check: Avoids arming setups if price moved too far or already hit TP."""
     dist = abs(current_price - entry_price)
     max_dist = 25.0 if "US100" in symbol else 3.5
 
@@ -226,8 +203,7 @@ def main():
     print("=======================================")
 
     engine = MT5Engine()
-    if not engine.start():
-        return
+    if not engine.start(): return
 
     fvg_detector = FVGDetector()
     risk_manager = RiskManager()
@@ -245,7 +221,6 @@ def main():
 
     try:
         while True:
-            # 1. Fetch live FTMO account metrics
             acc = mt5.account_info()
             if acc:
                 balance, equity = acc.balance, acc.equity
@@ -254,7 +229,6 @@ def main():
             else:
                 balance, equity, pnl_today, login, server = 0, 0, 0, "--", "--"
 
-            # 2. Remote synchronization every 3 seconds
             agora = time.time()
             if agora - last_hb >= 3.0:
                 last_hb = agora
@@ -274,46 +248,43 @@ def main():
                     if remote.get("active_symbol_mode"):
                         active_mode = remote.get("active_symbol_mode")
 
-                    # AI Auto-Adapt check: adjust profile dynamically
-                    if remote.get("auto_profile_ia") and current_profile != "tatico":
-                        current_profile = "tatico"
-                        sync.add_log(None, "AI Auto-Adapt active: Defaulting to TACTICAL profile", "INFO")
-
-            # 3. Active Management of Open Trades (BE & Trailing)
             manage_open_trades(cached_settings)
 
-            # 4. Check for Remote Commands from Web App
+            # 4. LEITOR DE COMANDOS DEDICADO (FILTRO ESPECÍFICO DE COMANDO)
             try:
-                latest_logs = sync.client.table("copilot_logs").select("id, message").order("created_at", {"ascending": False}).limit(1).execute()
-                if latest_logs.data:
-                    cmd_entry = latest_logs.data[0]
+                cmd_query = sync.client.table("copilot_logs")\
+                    .select("id, message")\
+                    .ilike("message", "%COMMAND:%")\
+                    .order("created_at", {"ascending": False})\
+                    .limit(1).execute()
+
+                if cmd_query.data:
+                    cmd_entry = cmd_query.data[0]
                     cmd_id = cmd_entry.get("id")
-                    last_msg = cmd_entry.get("message", "")
+                    cmd_msg = cmd_entry.get("message", "")
 
                     if cmd_id != last_cmd_id:
-                        # EMERGENCY STOP COMMAND
-                        if "EMERGENCY_STOP_TRIGGERED" in last_msg:
-                            last_cmd_id = cmd_id
-                            cancelled = cancel_all_pending_orders()
-                            closed = close_all_open_positions()
-                            sync.add_log(None, f"EMERGENCY EXECUTED: Cancelled {cancelled} orders, closed {closed} positions", "DANGER")
+                        last_cmd_id = cmd_id
+                        print(f"📥 [COMMAND RECEIVED] {cmd_msg}")
 
-                        # DYNAMIC BACKTEST COMMAND
-                        elif "COMMAND: RUN_BACKTEST" in last_msg:
-                            last_cmd_id = cmd_id
-                            parts = last_msg.split(":")
+                        if "RUN_BACKTEST" in cmd_msg:
+                            parts = cmd_msg.split(":")
                             target_sym = parts[2] if len(parts) > 2 else "US100.cash"
                             target_days = int(parts[3]) if len(parts) > 3 else 2
 
-                            report_json = run_recent_backtest(engine, target_sym, target_days)
-                            if report_json:
-                                sync.add_log(target_sym, f"BACKTEST_RESULT:{json.dumps(report_json)}", "SUCCESS")
+                            report = run_recent_backtest(engine, target_sym, target_days)
+                            if report:
+                                sync.add_log(target_sym, f"BACKTEST_RESULT:{json.dumps(report)}", "SUCCESS")
                             else:
-                                sync.add_log(target_sym, "BACKTEST FAILED: Insufficient data", "DANGER")
-            except Exception:
+                                sync.add_log(target_sym, "BACKTEST FAILED: Insufficient candles", "DANGER")
+
+                        elif "EMERGENCY_STOP" in cmd_msg:
+                            c = cancel_all_pending_orders()
+                            p = close_all_open_positions()
+                            sync.add_log(None, f"EMERGENCY EXECUTED: Cancelled {c} orders, closed {p} positions", "DANGER")
+            except Exception as e:
                 pass
 
-            # 5. Asset targets selection
             if active_mode == "US100":
                 ativos_atuais = ["US100.cash"]
             elif active_mode == "XAUUSD":
@@ -321,12 +292,10 @@ def main():
             else:
                 ativos_atuais = ["US100.cash", "XAUUSD"]
 
-            # 6. Scanning loop
             for symbol in ativos_atuais:
                 df_m5 = engine.get_candles(symbol, mt5.TIMEFRAME_M5, 30)
                 df_m1 = engine.get_candles(symbol, mt5.TIMEFRAME_M1, 15)
-                if df_m5 is None or df_m1 is None:
-                    continue
+                if df_m5 is None or df_m1 is None: continue
 
                 current_price = df_m1.iloc[-1]['close']
                 fvgs = fvg_detector.find_unmitigated_fvgs(df_m5, symbol)
@@ -342,7 +311,6 @@ def main():
 
                         params = risk_manager.get_trade_parameters(current_profile, fvg, atr_m1, symbol, direction)
 
-                        # Distance & Target Filter
                         valid, dist_msg = is_fvg_close_enough(current_price, params["entry"], params["tp"], action_candidate, symbol)
                         if not valid:
                             processed_fvgs.append(fvg_id)

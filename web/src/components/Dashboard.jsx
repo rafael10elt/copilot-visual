@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { UserCheck, Power, Sparkles, BarChart3, AlertTriangle, X, CheckCircle2, Trophy, ArrowRight } from 'lucide-react';
+import { UserCheck, Power, Sparkles, BarChart3, AlertTriangle, X, CheckCircle2, Trophy, ArrowRight, Loader2 } from 'lucide-react';
 
 export default function Dashboard({ 
   status, 
@@ -9,7 +9,8 @@ export default function Dashboard({
   onUpdateSettings,
   latestBacktest,
   showReportModal,
-  setShowReportModal
+  setShowReportModal,
+  isBacktestLoading
 }) {
   const isOnline = status?.is_online;
   const pnl = Number(status?.pnl_today || 0);
@@ -17,12 +18,9 @@ export default function Dashboard({
   const [showEmergencyModal, setShowEmergencyModal] = useState(false);
   const [selectedAsset, setSelectedAsset] = useState('US100');
   const [selectedDays, setSelectedDays] = useState(2);
-  const [isRunningBacktest, setIsRunningBacktest] = useState(false);
 
-  const handleBacktestClick = async () => {
-    setIsRunningBacktest(true);
-    await onRunBacktest(selectedDays, selectedAsset);
-    setTimeout(() => setIsRunningBacktest(false), 2500);
+  const handleBacktestClick = () => {
+    onRunBacktest(selectedDays, selectedAsset);
   };
 
   const applyRecommendedProfile = (recommended) => {
@@ -77,7 +75,7 @@ export default function Dashboard({
             <Sparkles size={15} className="text-amber-400" />
             <h4 className="text-xs font-bold text-zinc-200 uppercase font-mono">Sandbox Backtest</h4>
           </div>
-          {latestBacktest && (
+          {latestBacktest && !isBacktestLoading && (
             <button
               onClick={() => setShowReportModal(true)}
               className="text-[10px] font-mono font-bold text-violet-400 hover:text-violet-300 underline flex items-center gap-1">
@@ -133,10 +131,19 @@ export default function Dashboard({
         {/* BOTÃO DISPARADOR */}
         <button
           onClick={handleBacktestClick}
-          disabled={isRunningBacktest}
+          disabled={isBacktestLoading}
           className="w-full py-2.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-xs font-mono font-bold text-amber-300 border border-zinc-700 transition-all flex items-center justify-center gap-2 shadow-lg">
-          <BarChart3 size={14} />
-          {isRunningBacktest ? `Analyzing ${selectedAsset} (${selectedDays}D)...` : `Run ${selectedAsset} Backtest (${selectedDays}D)`}
+          {isBacktestLoading ? (
+            <>
+              <Loader2 size={14} className="animate-spin text-amber-400" />
+              <span>Analyzing {selectedAsset} ({selectedDays}D)...</span>
+            </>
+          ) : (
+            <>
+              <BarChart3 size={14} />
+              <span>Run {selectedAsset} Backtest ({selectedDays}D)</span>
+            </>
+          )}
         </button>
       </div>
 
@@ -147,9 +154,9 @@ export default function Dashboard({
         <Power size={14} /> Emergency Stop (Flatten & Cancel)
       </button>
 
-      {/* MODAL 1: RELATÓRIO DO BACKTEST (ELEGANTE E DETALHADO) */}
-      {showReportModal && latestBacktest && (
-        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+      {/* MODAL 1: RELATÓRIO DO BACKTEST (COM ESTADO DE CARREGAMENTO) */}
+      {showReportModal && (
+        <div className="fixed inset-0 bg-black/85 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-zinc-900 border border-zinc-800 w-full max-w-sm rounded-2xl p-5 shadow-2xl relative animate-in fade-in zoom-in-95 duration-150 space-y-4">
             <button
               onClick={() => setShowReportModal(false)}
@@ -157,84 +164,96 @@ export default function Dashboard({
               <X size={18} />
             </button>
 
-            {/* Cabeçalho */}
-            <div className="flex items-center gap-3">
-              <div className="p-2.5 bg-amber-500/10 border border-amber-500/20 text-amber-400 rounded-xl">
-                <Trophy size={22} />
-              </div>
-              <div>
-                <h3 className="text-sm font-bold text-zinc-100 font-mono uppercase">
-                  {latestBacktest.symbol} Backtest
-                </h3>
-                <span className="text-[10px] text-zinc-400 font-mono">
-                  {latestBacktest.days} Days Window • {latestBacktest.setups} Setups Formed
-                </span>
-              </div>
-            </div>
-
-            {/* Placar dos 3 Perfis */}
-            <div className="space-y-2">
-              {/* SNIPER */}
-              <div className={`p-2.5 rounded-xl border flex items-center justify-between ${
-                latestBacktest.recommended === 'SNIPER'
-                  ? 'bg-amber-500/10 border-amber-500/40'
-                  : 'bg-zinc-950 border-zinc-800/70'
-              }`}>
+            {isBacktestLoading ? (
+              <div className="py-8 flex flex-col items-center justify-center text-center space-y-3">
+                <Loader2 size={32} className="animate-spin text-amber-400" />
                 <div>
-                  <strong className="text-xs font-bold font-mono text-zinc-200 block">SNIPER (1:4 R:R)</strong>
-                  <span className="text-[9px] text-zinc-500 font-mono">Tight SL • Long expansion target</span>
-                </div>
-                <div className="text-right">
-                  <span className="text-sm font-black font-mono text-amber-300">{latestBacktest.sniper_rate}%</span>
-                  <span className="text-[9px] text-zinc-500 block font-mono">Win Rate</span>
+                  <h3 className="text-sm font-bold text-zinc-100 font-mono">Running MT5 Sandbox</h3>
+                  <p className="text-[11px] text-zinc-400 font-mono mt-1">
+                    Scanning historical M5 candles and calculating FVG win rates...
+                  </p>
                 </div>
               </div>
+            ) : latestBacktest ? (
+              <>
+                <div className="flex items-center gap-3">
+                  <div className="p-2.5 bg-amber-500/10 border border-amber-500/20 text-amber-400 rounded-xl">
+                    <Trophy size={22} />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-bold text-zinc-100 font-mono uppercase">
+                      {latestBacktest.symbol} Backtest
+                    </h3>
+                    <span className="text-[10px] text-zinc-400 font-mono">
+                      {latestBacktest.days} Days Window • {latestBacktest.setups} Setups Formed
+                    </span>
+                  </div>
+                </div>
 
-              {/* TACTICAL */}
-              <div className={`p-2.5 rounded-xl border flex items-center justify-between ${
-                latestBacktest.recommended === 'TACTICAL'
-                  ? 'bg-blue-500/10 border-blue-500/40'
-                  : 'bg-zinc-950 border-zinc-800/70'
-              }`}>
-                <div>
-                  <strong className="text-xs font-bold font-mono text-zinc-200 block">TACTICAL (1:2.5 R:R)</strong>
-                  <span className="text-[9px] text-zinc-500 font-mono">Balanced SL • Medium target</span>
-                </div>
-                <div className="text-right">
-                  <span className="text-sm font-black font-mono text-blue-300">{latestBacktest.tatico_rate}%</span>
-                  <span className="text-[9px] text-zinc-500 block font-mono">Win Rate</span>
-                </div>
-              </div>
+                <div className="space-y-2">
+                  <div className={`p-2.5 rounded-xl border flex items-center justify-between ${
+                    latestBacktest.recommended === 'SNIPER'
+                      ? 'bg-amber-500/10 border-amber-500/40'
+                      : 'bg-zinc-950 border-zinc-800/70'
+                  }`}>
+                    <div>
+                      <strong className="text-xs font-bold font-mono text-zinc-200 block">SNIPER (1:4 R:R)</strong>
+                      <span className="text-[9px] text-zinc-500 font-mono">Tight SL • Long expansion target</span>
+                    </div>
+                    <div className="text-right">
+                      <span className="text-sm font-black font-mono text-amber-300">{latestBacktest.sniper_rate}%</span>
+                      <span className="text-[9px] text-zinc-500 block font-mono">Win Rate</span>
+                    </div>
+                  </div>
 
-              {/* GUARDIAN */}
-              <div className={`p-2.5 rounded-xl border flex items-center justify-between ${
-                latestBacktest.recommended === 'GUARDIAN'
-                  ? 'bg-emerald-500/10 border-emerald-500/40'
-                  : 'bg-zinc-950 border-zinc-800/70'
-              }`}>
-                <div>
-                  <strong className="text-xs font-bold font-mono text-zinc-200 block">GUARDIAN (1:1.5 R:R)</strong>
-                  <span className="text-[9px] text-zinc-500 font-mono">Wide ATR SL • High hit rate</span>
-                </div>
-                <div className="text-right">
-                  <span className="text-sm font-black font-mono text-emerald-300">{latestBacktest.guardiao_rate}%</span>
-                  <span className="text-[9px] text-zinc-500 block font-mono">Win Rate</span>
-                </div>
-              </div>
-            </div>
+                  <div className={`p-2.5 rounded-xl border flex items-center justify-between ${
+                    latestBacktest.recommended === 'TACTICAL'
+                      ? 'bg-blue-500/10 border-blue-500/40'
+                      : 'bg-zinc-950 border-zinc-800/70'
+                  }`}>
+                    <div>
+                      <strong className="text-xs font-bold font-mono text-zinc-200 block">TACTICAL (1:2.5 R:R)</strong>
+                      <span className="text-[9px] text-zinc-500 font-mono">Balanced SL • Medium target</span>
+                    </div>
+                    <div className="text-right">
+                      <span className="text-sm font-black font-mono text-blue-300">{latestBacktest.tatico_rate}%</span>
+                      <span className="text-[9px] text-zinc-500 block font-mono">Win Rate</span>
+                    </div>
+                  </div>
 
-            {/* Sugestão de Perfil */}
-            <div className="bg-zinc-950 p-3 rounded-xl border border-zinc-800/80 flex items-center justify-between">
-              <div>
-                <span className="text-[10px] text-zinc-500 font-mono uppercase block">Recommended Profile</span>
-                <strong className="text-xs font-bold text-emerald-400 font-mono">{latestBacktest.recommended}</strong>
+                  <div className={`p-2.5 rounded-xl border flex items-center justify-between ${
+                    latestBacktest.recommended === 'GUARDIAN'
+                      ? 'bg-emerald-500/10 border-emerald-500/40'
+                      : 'bg-zinc-950 border-zinc-800/70'
+                  }`}>
+                    <div>
+                      <strong className="text-xs font-bold font-mono text-zinc-200 block">GUARDIAN (1:1.5 R:R)</strong>
+                      <span className="text-[9px] text-zinc-500 font-mono">Wide ATR SL • High hit rate</span>
+                    </div>
+                    <div className="text-right">
+                      <span className="text-sm font-black font-mono text-emerald-300">{latestBacktest.guardiao_rate}%</span>
+                      <span className="text-[9px] text-zinc-500 block font-mono">Win Rate</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="bg-zinc-950 p-3 rounded-xl border border-zinc-800/80 flex items-center justify-between">
+                  <div>
+                    <span className="text-[10px] text-zinc-500 font-mono uppercase block">Recommended Profile</span>
+                    <strong className="text-xs font-bold text-emerald-400 font-mono">{latestBacktest.recommended}</strong>
+                  </div>
+                  <button
+                    onClick={() => applyRecommendedProfile(latestBacktest.recommended)}
+                    className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-bold font-mono transition-all flex items-center gap-1 shadow-md">
+                    <CheckCircle2 size={13} /> Apply Profile
+                  </button>
+                </div>
+              </>
+            ) : (
+              <div className="py-6 text-center text-zinc-400 text-xs font-mono">
+                No backtest result available yet. Click "Run Backtest" to generate one.
               </div>
-              <button
-                onClick={() => applyRecommendedProfile(latestBacktest.recommended)}
-                className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-bold font-mono transition-all flex items-center gap-1 shadow-md">
-                <CheckCircle2 size={13} /> Apply Profile
-              </button>
-            </div>
+            )}
           </div>
         </div>
       )}
