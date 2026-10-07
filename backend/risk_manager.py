@@ -1,4 +1,4 @@
-# risk_manager.py — Gestão de Risco com Reset na Meia-Noite do Servidor e Proteções FTMO
+# risk_manager.py — Gestão de Risco com Reset no Servidor, Trailing Stop M1 e Escudo FTMO
 import MetaTrader5 as mt5
 import pandas as pd
 import math
@@ -9,37 +9,26 @@ class RiskManager:
         self.risk_per_trade_usd = risk_per_trade_usd
         self.max_daily_loss_usd = max_daily_loss_usd
         
-        # Benchmark inicial alinhado à virada do servidor da corretora
         self.start_day_balance = None
         self.peak_day_equity = None
         self.daily_lock_active = False
         self.current_broker_day_str = None
 
     def update_account_state(self, current_balance, current_equity, broker_server_time=None):
-        """
-        Atualiza o estado da conta respeitando a virada de dia do servidor (00:00:00).
-        Monitora tanto o drawdown em relação ao benchmark quanto o pico intraday de equity.
-        """
         now = broker_server_time or datetime.now()
         today_str = now.strftime('%Y-%m-%d')
 
-        # Nova virada oficial de dia no servidor da corretora
         if self.current_broker_day_str != today_str:
             self.current_broker_day_str = today_str
-            # Padrão FTMO: o benchmark é o maior entre Balance e Equity na virada da meia-noite
             self.start_day_balance = max(current_balance, current_equity)
             self.peak_day_equity = current_equity
             self.daily_lock_active = False
             print(f"🔄 [PROP FIRM SHIELD] Novo dia no servidor ({today_str}). Benchmark inicial: ${self.start_day_balance:.2f}")
 
-        # Atualiza a máxima de equity atingida ao longo do dia
         if current_equity > (self.peak_day_equity or 0.0):
             self.peak_day_equity = current_equity
 
-        # Perda acumulada a partir do referencial inicial do dia
         drawdown_from_start = self.start_day_balance - current_equity
-        
-        # Margem de segurança preventiva (85% do teto) para evitar rompimento por slippage
         soft_stop_limit = self.max_daily_loss_usd * 0.85
 
         if drawdown_from_start >= soft_stop_limit:
@@ -63,10 +52,6 @@ class RiskManager:
         return round(float(atr), 2)
 
     def get_trade_parameters(self, profile, fvg, atr, symbol, direction, use_ce_50=True):
-        """
-        Calcula entrada, SL e TP. 
-        Se use_ce_50 for True, entra nos 50% do gap, reduzindo o SL e melhorando o R:R.
-        """
         is_nasdaq = any(x in symbol.upper() for x in ["US100", "NAS", "USTEC", "NQ"])
         buffer = 1.0 if is_nasdaq else 0.30
         max_allowed_risk = 25.0 if is_nasdaq else 3.50
@@ -149,6 +134,40 @@ class RiskManager:
                 return None
             proposed_sl = open_price - min_offset
             if proposed_sl <= info.ask + stops_level:
+                return None
+            return round(proposed_sl, info.digits)
+
+        return None
+
+    def calculate_safe_trailing_sl(self, symbol, position_type, open_price, current_price, current_sl, last_m1_low, last_m1_high):
+        """
+        Rastreia vela a vela após o trade avançar no lucro, garantindo proteção sem violar stops_level.
+        """
+        info = mt5.symbol_info(symbol)
+        if not info: return None
+
+        point = info.point
+        stops_level = info.trade_stops_level * point
+        spread = info.spread * point
+        buffer = 3 * point
+
+        if position_type == mt5.POSITION_TYPE_BUY:
+            proposed_sl = last_m1_low - buffer
+            # Só move para cima e se já estiver acima do breakeven
+            if proposed_sl <= current_sl or proposed_sl <= open_price:
+                return None
+            if proposed_sl >= (info.bid - stops_level):
+                return None
+            return round(proposed_sl, info.digits)
+
+        elif position_type == mt5.POSITION_TYPE_SELL:
+            proposed_sl = last_m1_high + buffer
+            # Só move para baixo e se já estiver abaixo do breakeven
+            if current_sl > 0 and proposed_sl >= current_sl:
+                return None
+            if proposed_sl >= open_price:
+                return None
+            if proposed_sl <= (info.ask + stops_level):
                 return None
             return round(proposed_sl, info.digits)
 

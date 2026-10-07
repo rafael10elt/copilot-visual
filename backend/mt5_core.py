@@ -1,4 +1,4 @@
-# mt5_core.py — Conexão, Killzones UTC, Filtro de Spread, Sweeps e Visão Computacional
+# mt5_core.py — Conexão, Killzones com DST Dinâmico dos EUA, Filtro de Spread e Visão Computacional
 import MetaTrader5 as mt5
 import pandas as pd
 import numpy as np
@@ -132,8 +132,24 @@ class MT5Engine:
 
 class InstitutionalSessionFilter:
     @staticmethod
-    def is_session_active(symbol, broker_candle_time, broker_utc_offset=2):
-        """Valida as Killzones oficiais de Londres e NY sincronizadas em UTC."""
+    def is_us_daylight_saving(dt_utc):
+        """
+        Calcula se os EUA estão em Horário de Verão (EDT: UTC-4) ou Inverno (EST: UTC-5).
+        Inicia no 2º domingo de março e encerra no 1º domingo de novembro.
+        """
+        year = dt_utc.year
+        # Segundo domingo de março (entre 8 e 14 de março)
+        march_8 = datetime(year, 3, 8)
+        second_sunday_march = march_8 + timedelta(days=(6 - march_8.weekday()) % 7)
+        # Primeiro domingo de novembro (entre 1 e 7 de novembro)
+        nov_1 = datetime(year, 11, 1)
+        first_sunday_nov = nov_1 + timedelta(days=(6 - nov_1.weekday()) % 7)
+
+        return second_sunday_march <= dt_utc.replace(tzinfo=None) < first_sunday_nov
+
+    @classmethod
+    def is_session_active(cls, symbol, broker_candle_time, broker_utc_offset=2):
+        """Valida as Killzones oficiais alinhadas em UTC com detecção de DST de Nova York."""
         candle_utc = broker_candle_time - timedelta(hours=broker_utc_offset)
         utc_hour = candle_utc.hour
         utc_minute = candle_utc.minute
@@ -145,8 +161,13 @@ class InstitutionalSessionFilter:
         is_nasdaq = any(x in symbol.upper() for x in ["US100", "NAS", "USTEC", "NQ"])
 
         if is_nasdaq:
-            # NY Cash Open e expansão: 13:30 às 17:00 UTC
-            if (utc_hour == 13 and utc_minute >= 30) or (14 <= utc_hour < 17):
+            is_dst = cls.is_us_daylight_saving(candle_utc)
+            # No Verão (EDT): 09:30 EDT = 13:30 UTC
+            # No Inverno (EST): 09:30 EST = 14:30 UTC
+            ny_open_hour = 13 if is_dst else 14
+            ny_close_hour = 17 if is_dst else 18
+
+            if (utc_hour == ny_open_hour and utc_minute >= 30) or (ny_open_hour < utc_hour < ny_close_hour):
                 return True
             return False
         else:

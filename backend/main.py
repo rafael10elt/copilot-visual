@@ -1,4 +1,4 @@
-# main.py — Orquestrador HFT com Métricas de 30 Dias, Sandbox de até 30D e Proteções de Mesa
+# main.py — Orquestrador HFT com Métricas 30D, Trailing Stop M1 e Escudos Institucionais
 import time
 import json
 import requests
@@ -174,35 +174,65 @@ def close_all_open_positions():
             if res.retcode == mt5.TRADE_RETCODE_DONE: closed += 1
     return closed
 
-def manage_open_trades(risk_manager, settings):
-    if not settings.get("breakeven_enabled", False): return
+def manage_open_trades(engine, risk_manager, settings):
+    """Gerencia Break-Even e Trailing Stop M1 de posições ativas simultaneamente."""
+    be_enabled = settings.get("breakeven_enabled", False)
+    trailing_enabled = settings.get("trailing_enabled", False)
+
+    if not be_enabled and not trailing_enabled:
+        return
+
     positions = mt5.positions_get()
-    if not positions: return
+    if not positions:
+        return
 
     for p in positions:
-        if p.magic != ROBOT_MAGIC: continue
+        if p.magic != ROBOT_MAGIC:
+            continue
 
         current_price = p.price_current
         open_price = p.price_open
         current_sl = p.sl
 
-        if p.type == mt5.POSITION_TYPE_BUY and current_sl >= open_price: continue
-        if p.type == mt5.POSITION_TYPE_SELL and current_sl > 0 and current_sl <= open_price: continue
+        # 1. Rastreamento por Trailing Stop (M1) se ativado
+        if trailing_enabled:
+            df_m1 = engine.get_candles(p.symbol, mt5.TIMEFRAME_M1, 3)
+            if df_m1 is not None and len(df_m1) >= 2:
+                last_completed = df_m1.iloc[-2]
+                new_trail_sl = risk_manager.calculate_safe_trailing_sl(
+                    p.symbol, p.type, open_price, current_price, current_sl,
+                    float(last_completed['low']), float(last_completed['high'])
+                )
+                if new_trail_sl:
+                    req = {
+                        "action": mt5.TRADE_ACTION_SLTP,
+                        "position": p.ticket,
+                        "sl": float(new_trail_sl),
+                        "tp": float(p.tp)
+                    }
+                    res = mt5.order_send(req)
+                    if res.retcode == mt5.TRADE_RETCODE_DONE:
+                        print(f"📈 [TRAILING M1] #{p.ticket} ({p.symbol}) SL ajustado para {new_trail_sl}")
+                    continue
 
-        new_sl = risk_manager.calculate_safe_breakeven_sl(p.symbol, p.type, open_price, current_price)
-        if new_sl:
-            req = {
-                "action": mt5.TRADE_ACTION_SLTP,
-                "position": p.ticket,
-                "sl": float(new_sl),
-                "tp": float(p.tp)
-            }
-            res = mt5.order_send(req)
-            if res.retcode == mt5.TRADE_RETCODE_DONE:
-                print(f"🛡️ [BREAK-EVEN] #{p.ticket} ({p.symbol}) SL ajustado para {new_sl}")
+        # 2. Break-Even tradicional caso o Trailing não tenha atuado
+        if be_enabled:
+            if p.type == mt5.POSITION_TYPE_BUY and current_sl >= open_price: continue
+            if p.type == mt5.POSITION_TYPE_SELL and current_sl > 0 and current_sl <= open_price: continue
+
+            new_be_sl = risk_manager.calculate_safe_breakeven_sl(p.symbol, p.type, open_price, current_price)
+            if new_be_sl:
+                req = {
+                    "action": mt5.TRADE_ACTION_SLTP,
+                    "position": p.ticket,
+                    "sl": float(new_be_sl),
+                    "tp": float(p.tp)
+                }
+                res = mt5.order_send(req)
+                if res.retcode == mt5.TRADE_RETCODE_DONE:
+                    print(f"🛡️ [BREAK-EVEN] #{p.ticket} ({p.symbol}) SL ajustado para {new_be_sl}")
 
 def get_performance_stats(risk_base=50.0):
-    """Calcula estatísticas de execução diária (Hoje) e agregadas dos últimos 30 Dias."""
     try:
         now = datetime.now()
         start_of_today = datetime(now.year, now.month, now.day, 0, 0, 0)
@@ -224,14 +254,12 @@ def get_performance_stats(risk_base=50.0):
         max_drawdown_usd = 0.0
 
         if deals_30d:
-            # Ordena cronologicamente para calcular o rebaixamento máximo exato (Max Drawdown)
             sorted_deals = sorted(deals_30d, key=lambda x: x.time)
             
             for d in sorted_deals:
                 if d.entry == mt5.DEAL_ENTRY_OUT and d.magic == ROBOT_MAGIC:
                     profit = round(d.profit + d.commission + d.swap, 2)
                     
-                    # Agregação 30D
                     pnl_30d += profit
                     if profit > 0:
                         wins_30d += 1
@@ -247,7 +275,6 @@ def get_performance_stats(risk_base=50.0):
                     if dd > max_drawdown_usd:
                         max_drawdown_usd = dd
 
-                    # Agregação de Hoje
                     if d.time >= start_of_today.timestamp():
                         today_realized_pnl += profit
                         if profit > 0: today_wins += 1
@@ -325,10 +352,6 @@ def get_performance_stats(risk_base=50.0):
 
 
 def run_recent_backtest(engine, symbol, days=0, risk_per_trade=50.0):
-    """
-    MOTOR DO SANDBOX BACKTEST REALISTA (SUPORTA ATÉ 30 DIAS)
-    Utiliza np.searchsorted para processamento ultrarrápido de até 45.000 velas M1.
-    """
     if not symbol: return None
 
     broker_now = engine.get_broker_current_time(symbol)
@@ -427,7 +450,6 @@ def run_recent_backtest(engine, symbol, days=0, risk_per_trade=50.0):
 
                         setups_mapped += 1
 
-                        # Busca binária O(log N) — 100x mais veloz que loop sequencial para 30 dias
                         start_idx = int(np.searchsorted(m1_times, np.datetime64(f['raw_time']), side='right'))
 
                         if start_idx >= len(m1_times) or start_idx <= bot_busy_until_m1_idx:
@@ -602,13 +624,12 @@ def main():
     active_mode = "BOTH"
     cached_settings = {}
 
-    sync.add_log(None, "Motor conectado com Métricas 30D e Sandbox Extendido.", "INFO")
+    sync.add_log(None, "Motor conectado com DST Automático, Trailing M1 e Background AI.", "INFO")
 
     try:
         while True:
             broker_time = engine.get_broker_current_time("XAUUSD")
 
-            # 1. Escudo de Mesa (Trava no Benchmark da Meia-Noite da Corretora)
             acc = mt5.account_info()
             if acc:
                 balance, equity = acc.balance, acc.equity
@@ -624,14 +645,12 @@ def main():
             else:
                 balance, equity, pnl_today, login, server = 0, 0, 0, "--", "--"
 
-            # 2. Escudo de Notícias Econômicas
             is_news, news_title = news_filter.is_news_window_active(window_minutes=15)
             if is_news:
                 purged = cancel_all_pending_orders()
                 if purged > 0:
                     sync.add_log(None, f"📰 [NEWS SHIELD] {purged} ordens pendentes canceladas por anúncio: {news_title}", "WARN")
 
-            # 3. Sincronização Periódica a cada 2s + Comandos Remotos
             agora = time.time()
             if agora - last_hb >= 2.0:
                 last_hb = agora
@@ -650,7 +669,6 @@ def main():
                         try: sync.client.table("copilot_settings").update({"command": None}).eq("id", 1).execute()
                         except: pass
 
-                        # GATILHO DO SANDBOX BACKTEST VICIADO PELO DASHBOARD (0, 1, 7, 15, 30 DIAS)
                         if "RUN_BACKTEST" in cmd:
                             parts = cmd.split(":")
                             cat = "NASDAQ" if "US100" in parts[1] else "GOLD"
@@ -674,20 +692,18 @@ def main():
                 perf_data["active_strategy"] = {
                     "entry_type": "50% Consequent Encroachment (CE)" if cached_settings.get("use_ce_50", True) else "Borda do FVG",
                     "breakeven": "ATIVO (1.2R)" if cached_settings.get("breakeven_enabled", False) else "DESLIGADO",
-                    "trailing": "ATIVO" if cached_settings.get("trailing_enabled", False) else "DESLIGADO"
+                    "trailing": "ATIVO (M1)" if cached_settings.get("trailing_enabled", False) else "DESLIGADO"
                 }
 
                 sync.send_heartbeat(current_profile, pnl_today, login, balance, equity, server, perf_data)
 
-            # 4. Gestão de Posições Abertas
-            manage_open_trades(risk_manager, cached_settings)
+            # Executa Break-Even e Trailing Stop M1 ativamente
+            manage_open_trades(engine, risk_manager, cached_settings)
 
-            # Janela de notícias bloqueia armamento de novas ordens
             if is_news:
                 time.sleep(1)
                 continue
 
-            # 5. Seleção de Ativos Alvo
             targets = []
             if active_mode in ["BOTH", "US100"]:
                 sym_nasdaq = engine.resolve_symbol("NASDAQ")
@@ -697,7 +713,6 @@ def main():
                 sym_gold = engine.resolve_symbol("GOLD")
                 if sym_gold: targets.append(("GOLD", sym_gold))
 
-            # 6. Varredura Operacional Institucional
             for category, symbol in targets:
                 if has_active_order_or_position(symbol):
                     continue
@@ -735,6 +750,8 @@ def main():
 
                 info = mt5.symbol_info(symbol)
                 spread = info.spread if info else 10
+                
+                # Chamada assíncrona não-bloqueante
                 ia_agent.update_macro_regime_async(category, structure, atr, spread)
 
                 fvgs = fvg_detector.find_unmitigated_fvgs(df_m5, symbol)

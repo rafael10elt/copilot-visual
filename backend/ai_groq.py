@@ -1,7 +1,8 @@
-# ai_groq.py — Agente de Regime Macro Institucional (Filtro Estrito de Modelos de Chat)
+# ai_groq.py — Agente de Regime Macro com Execução Não-Bloqueante em Thread Paralela
 import os
 import json
 import time
+import threading
 from groq import Groq
 from dotenv import load_dotenv
 
@@ -18,9 +19,9 @@ class LumiGroqAgent:
             "NASDAQ": {"bias": "NEUTRAL", "allowed_profiles": ["tatico", "guardiao"], "updated_at": 0},
             "GOLD": {"bias": "NEUTRAL", "allowed_profiles": ["tatico", "guardiao"], "updated_at": 0}
         }
+        self.is_querying = False
 
     def detect_best_active_model(self):
-        """Descobre modelos de chat reais, ignorando modelos de classificação/guarda."""
         candidatos_preferidos = [
             "llama-3.3-70b-versatile",
             "llama-3.1-8b-instant",
@@ -36,19 +37,16 @@ class LumiGroqAgent:
 
         try:
             lista = self.client.models.list()
-            # Filtra apenas modelos que são de texto/chat real
             ativos = [
                 m.id for m in lista.data 
                 if not any(b in m.id.lower() for b in termos_bloqueados)
             ]
             
-            # 1. Tenta correspondência com a lista de preferidos
             for cand in candidatos_preferidos:
                 if cand in ativos:
                     print(f"✅ [IA GROQ] Modelo de chat ativo selecionado: {cand}")
                     return cand
 
-            # 2. Se não estiver nos preferidos, pega o primeiro modelo de chat válido
             if len(ativos) > 0:
                 print(f"ℹ️ [IA GROQ] Usando modelo de chat disponível: {ativos[0]}")
                 return ativos[0]
@@ -59,7 +57,8 @@ class LumiGroqAgent:
         return "llama-3.1-8b-instant"
 
     def update_macro_regime_async(self, symbol_key, m15_structure, atr, spreads):
-        if not self.enabled or not self.client or not self.model:
+        """Dispara consulta assíncrona em thread separada sem travar o loop de 1s do robô."""
+        if not self.enabled or not self.client or not self.model or self.is_querying:
             return
 
         now = time.time()
@@ -67,7 +66,16 @@ class LumiGroqAgent:
             return
 
         self.macro_cache[symbol_key]["updated_at"] = now
+        self.is_querying = True
 
+        thread = threading.Thread(
+            target=self._worker_query_groq,
+            args=(symbol_key, m15_structure, atr, spreads),
+            daemon=True
+        )
+        thread.start()
+
+    def _worker_query_groq(self, symbol_key, m15_structure, atr, spreads):
         prompt = f"""
         Você é o Chief Risk Officer de uma mesa proprietária institucional.
         Analise o regime para o ativo {symbol_key}:
@@ -96,10 +104,12 @@ class LumiGroqAgent:
             data = json.loads(response.choices[0].message.content)
             self.macro_cache[symbol_key]["bias"] = data.get("bias", "NEUTRAL")
             self.macro_cache[symbol_key]["allowed_profiles"] = data.get("allowed_profiles", ["tatico"])
-            print(f"🧠 [IA GROQ MACRO] {symbol_key} calibrado via {self.model}: Viés {data.get('bias')} | Perfis: {data.get('allowed_profiles')}")
+            print(f"🧠 [IA GROQ MACRO] {symbol_key} calibrado em background via {self.model}: Viés {data.get('bias')}")
 
         except Exception as e:
-            print(f"⚠️ [IA GROQ] Falha na consulta ({e}). Heurística SMC local mantida no ativo {symbol_key}.")
+            print(f"⚠️ [IA GROQ] Falha na consulta em background ({e}). Heurística mantida.")
+        finally:
+            self.is_querying = False
 
     def quick_validate_trade(self, symbol_key, direction, current_profile):
         cached = self.macro_cache.get(symbol_key)
