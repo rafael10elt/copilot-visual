@@ -37,56 +37,46 @@ class RiskManager:
         return False
 
     def get_trade_parameters(self, profile, fvg, atr, symbol, direction):
-        """
-        Gera os preços exatos de SL e TP baseados no Perfil e na Volatilidade (ATR).
-        """
-        # Distância padrão do Spread/Ruído baseada no ativo
         buffer = 1.0 if "US100" in symbol or "NAS" in symbol else 0.3
+        
+        # TETO MÁXIMO DE STOP LOSS PARA SCALPING (Evita trades gigantes)
+        max_allowed_risk = 25.0 if "US100" in symbol else 3.5 # Max 25 pts na Nasdaq, Max $3.50 no Ouro
         
         fvg_top = fvg['top']
         fvg_bottom = fvg['bottom']
-        fvg_size = fvg['size']
         
-        sl_price = 0.0
-        tp_price = 0.0
-
+        # Limita o tamanho do risco ao teto máximo
+        raw_risk = abs(fvg_top - fvg_bottom) + buffer
+        capped_risk = min(raw_risk, max_allowed_risk)
+        
         if direction == 'BUY':
-            entry_price = fvg_top # Limit order na borda superior do FVG
-            
+            entry_price = fvg_top
             if profile == 'sniper':
-                # SL colado na borda inferior do FVG + pequeno buffer. Alvo longo (1:4)
-                sl_price = fvg_bottom - buffer
-                risk = entry_price - sl_price
+                risk = capped_risk
+                sl_price = entry_price - risk
                 tp_price = entry_price + (risk * 4.0)
-                
             elif profile == 'tatico':
-                # SL com respiro médio (FVG + Metade do ATR). Alvo médio (1:2.5)
-                sl_price = fvg_bottom - (atr * 0.5)
-                risk = entry_price - sl_price
+                risk = min(capped_risk + (atr * 0.5), max_allowed_risk)
+                sl_price = entry_price - risk
                 tp_price = entry_price + (risk * 2.5)
-                
             elif profile == 'guardiao':
-                # SL protegido pela volatilidade total (FVG + 1 ATR inteiro). Alvo curto (1:1.5)
-                sl_price = fvg_bottom - atr
-                risk = entry_price - sl_price
+                risk = min(capped_risk + atr, max_allowed_risk)
+                sl_price = entry_price - risk
                 tp_price = entry_price + (risk * 1.5)
 
         elif direction == 'SELL':
-            entry_price = fvg_bottom # Limit order na borda inferior do FVG
-            
+            entry_price = fvg_bottom
             if profile == 'sniper':
-                sl_price = fvg_top + buffer
-                risk = sl_price - entry_price
+                risk = capped_risk
+                sl_price = entry_price + risk
                 tp_price = entry_price - (risk * 4.0)
-                
             elif profile == 'tatico':
-                sl_price = fvg_top + (atr * 0.5)
-                risk = sl_price - entry_price
+                risk = min(capped_risk + (atr * 0.5), max_allowed_risk)
+                sl_price = entry_price + risk
                 tp_price = entry_price - (risk * 2.5)
-                
             elif profile == 'guardiao':
-                sl_price = fvg_top + atr
-                risk = sl_price - entry_price
+                risk = min(capped_risk + atr, max_allowed_risk)
+                sl_price = entry_price + risk
                 tp_price = entry_price - (risk * 1.5)
 
         return {
@@ -95,7 +85,7 @@ class RiskManager:
             "tp": round(tp_price, 2),
             "risk_points": round(risk, 2)
         }
-
+    
     def calculate_lot_size(self, symbol, risk_points):
         """
         Calcula o lote ideal no MT5 para arriscar exatamente X dólares.

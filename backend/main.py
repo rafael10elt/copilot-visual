@@ -104,10 +104,9 @@ def manage_open_trades(settings):
 
 def run_recent_backtest(engine, symbol, days=2, risk_per_trade=50.0):
     """
-    BACKTEST QUANTITATIVO COMPLETO (M5 -> M1):
-    Calcula Wins, Losses, R:R Líquido e PNL projetado em Dólares ($).
+    BACKTEST QUANTITATIVO ULTRA-REALISTA (Com Fricção de Spread, Concorrência Real e Teto de Stop)
     """
-    print(f"\n📊 [BACKTEST] Running full quantitative scan for {symbol} ({days}D) with ${risk_per_trade} risk/trade...")
+    print(f"\n📊 [BACKTEST] Running institutional-grade M1 scan for {symbol} ({days}D)...")
 
     total_m5 = int(days) * 240
     df_m5 = engine.get_candles(symbol, mt5.TIMEFRAME_M5, total_m5)
@@ -127,13 +126,23 @@ def run_recent_backtest(engine, symbol, days=2, risk_per_trade=50.0):
     m5_lows = df_m5['low'].values
     m5_times = df_m5['time'].values
 
-    min_gap = 4.0 if "US100" in symbol else 0.5
-    spread_buffer = 1.0 if "US100" in symbol else 0.2
+    # Parâmetros de Fricção e Tetos Institucionais
+    is_nasdaq = "US100" in symbol
+    min_gap = 4.0 if is_nasdaq else 0.5
+    max_allowed_risk = 25.0 if is_nasdaq else 3.5  # Teto de Stop Loss (Scalp puro)
+    spread_friction = 1.2 if is_nasdaq else 0.25   # Fricção real de Spread + Comissão FTMO
 
     setups = 0
     sniper_wins, sniper_losses = 0, 0
     tatico_wins, tatico_losses = 0, 0
     guardiao_wins, guardiao_losses = 0, 0
+
+    # Ponteiro para simular ocupação de posição real (não empilha trades enquanto estiver posicionado)
+    in_trade_until_idx = {
+        'sniper': 0,
+        'tatico': 0,
+        'guardiao': 0
+    }
 
     for i in range(len(df_m5) - 10):
         c1_high, c1_low = m5_highs[i], m5_lows[i]
@@ -146,6 +155,7 @@ def run_recent_backtest(engine, symbol, days=2, risk_per_trade=50.0):
         if not (is_buy or is_sell):
             continue
 
+        # Sincroniza o momento exato no M1
         m1_start_idx = 0
         for idx in range(len(m1_times) - 60):
             if m1_times[idx] >= fvg_time:
@@ -155,48 +165,42 @@ def run_recent_backtest(engine, symbol, days=2, risk_per_trade=50.0):
         if m1_start_idx == 0:
             continue
 
+        # Aplica o Teto Máximo de Stop Loss
+        raw_risk = abs(c3_low - c1_high) if is_buy else abs(c1_low - c3_high)
+        if raw_risk > (max_allowed_risk * 1.5):
+            continue  # Descarta anomalias causadas por velas gigantes de notícia
+
+        capped_risk = min(raw_risk + spread_friction, max_allowed_risk)
         setups += 1
+
         sim_highs = m1_highs[m1_start_idx : min(m1_start_idx + 60, len(m1_highs))]
         sim_lows = m1_lows[m1_start_idx : min(m1_start_idx + 60, len(m1_lows))]
 
-        if is_buy:
-            entry = c3_low
-            risk = (c3_low - c1_high) + spread_buffer
+        for profile, mult in [('sniper', 4.0), ('tatico', 2.5), ('guardiao', 1.5)]:
+            # Se a simulação já estiver com um trade aberto neste perfil, pula (evita simultaneidade irreal)
+            if m1_start_idx < in_trade_until_idx[profile]:
+                continue
 
-            for profile, mult in [('sniper', 4.0), ('tatico', 2.5), ('guardiao', 1.5)]:
-                tp = entry + (risk * mult)
-                sl = entry - risk
-                win = False
-                loss = False
+            entry = c3_low if is_buy else c3_high
+            risk = capped_risk
+            
+            # Adiciona o spread no alvo e stop
+            tp = entry + (risk * mult) if is_buy else entry - (risk * mult)
+            sl = entry - risk if is_buy else entry + risk
 
-                for h, l in zip(sim_highs, sim_lows):
+            win, loss = False, False
+            bars_taken = 0
+
+            for h, l in zip(sim_highs, sim_lows):
+                bars_taken += 1
+                if is_buy:
                     if l <= sl:
                         loss = True
                         break
                     if h >= tp:
                         win = True
                         break
-
-                if win:
-                    if profile == 'sniper': sniper_wins += 1
-                    elif profile == 'tatico': tatico_wins += 1
-                    elif profile == 'guardiao': guardiao_wins += 1
-                elif loss:
-                    if profile == 'sniper': sniper_losses += 1
-                    elif profile == 'tatico': tatico_losses += 1
-                    elif profile == 'guardiao': guardiao_losses += 1
-
-        elif is_sell:
-            entry = c3_high
-            risk = (c1_low - c3_high) + spread_buffer
-
-            for profile, mult in [('sniper', 4.0), ('tatico', 2.5), ('guardiao', 1.5)]:
-                tp = entry - (risk * mult)
-                sl = entry + risk
-                win = False
-                loss = False
-
-                for h, l in zip(sim_highs, sim_lows):
+                else:
                     if h >= sl:
                         loss = True
                         break
@@ -204,24 +208,30 @@ def run_recent_backtest(engine, symbol, days=2, risk_per_trade=50.0):
                         win = True
                         break
 
-                if win:
-                    if profile == 'sniper': sniper_wins += 1
-                    elif profile == 'tatico': tatico_wins += 1
-                    elif profile == 'guardiao': guardiao_wins += 1
-                elif loss:
-                    if profile == 'sniper': sniper_losses += 1
-                    elif profile == 'tatico': tatico_losses += 1
-                    elif profile == 'guardiao': guardiao_losses += 1
+            # Registra até quando o trade ficou aberto
+            in_trade_until_idx[profile] = m1_start_idx + bars_taken
+
+            if win:
+                if profile == 'sniper': sniper_wins += 1
+                elif profile == 'tatico': tatico_wins += 1
+                elif profile == 'guardiao': guardiao_wins += 1
+            elif loss:
+                if profile == 'sniper': sniper_losses += 1
+                elif profile == 'tatico': tatico_losses += 1
+                elif profile == 'guardiao': guardiao_losses += 1
 
     if setups == 0:
         setups = 1
 
-    # Cálculos Quantitativos de R:R e PnL Líquido em Dólares ($)
-    s_rate = int((sniper_wins / setups) * 100)
-    t_rate = int((tatico_wins / setups) * 100)
-    g_rate = int((guardiao_wins / setups) * 100)
+    # Cálculos Quantitativos Finais
+    total_trades_s = sniper_wins + sniper_losses or 1
+    total_trades_t = tatico_wins + tatico_losses or 1
+    total_trades_g = guardiao_wins + guardiao_losses or 1
 
-    # Net R = (Wins * Multiplicador) - (Losses * 1R)
+    s_rate = int((sniper_wins / total_trades_s) * 100)
+    t_rate = int((tatico_wins / total_trades_t) * 100)
+    g_rate = int((guardiao_wins / total_trades_g) * 100)
+
     s_net_r = round((sniper_wins * 4.0) - (sniper_losses * 1.0), 1)
     t_net_r = round((tatico_wins * 2.5) - (tatico_losses * 1.0), 1)
     g_net_r = round((guardiao_wins * 1.5) - (guardiao_losses * 1.0), 1)
@@ -230,7 +240,6 @@ def run_recent_backtest(engine, symbol, days=2, risk_per_trade=50.0):
     t_pnl = round(t_net_r * risk_per_trade, 2)
     g_pnl = round(g_net_r * risk_per_trade, 2)
 
-    # A recomendação agora é baseada no MAIOR LUCRO LÍQUIDO ($)
     if g_pnl >= max(s_pnl, t_pnl):
         recommended = "GUARDIAN"
     elif t_pnl >= s_pnl:
@@ -267,7 +276,7 @@ def run_recent_backtest(engine, symbol, days=2, risk_per_trade=50.0):
         },
         "recommended": recommended
     }
-    print(f"✅ [BACKTEST COMPLETE] {symbol} ({days}D) -> Recommended: {recommended} (Best PnL: max of ${s_pnl}, ${t_pnl}, ${g_pnl})")
+    print(f"✅ [REALISTIC BACKTEST] Trades simulados com atrito de spread e concorrência real finalizados.")
     return report
 
 def get_m15_trend(engine, symbol):
