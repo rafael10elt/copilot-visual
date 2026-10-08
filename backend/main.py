@@ -1,4 +1,4 @@
-# main.py — Orquestrador HFT com Execução de Ordens Blindada, BE 1.2R Real e Defesa Ativa FTMO
+# main.py — Orquestrador HFT com Modo Fiel ao Backtest (1:1), Sessão Personalizável e Blindagem FTMO
 import time
 import json
 import requests
@@ -22,7 +22,6 @@ ROBOT_MAGIC = 777999
 
 
 class EconomicNewsFilter:
-    """Consome o calendário ForexFactory e bloqueia operações em horários de alto impacto."""
     def __init__(self, cache_ttl_seconds=900):
         self.cache_ttl = cache_ttl_seconds
         self.last_fetch = 0
@@ -77,10 +76,6 @@ def has_active_order_or_position(symbol):
 
 
 def send_limit_order(symbol, action, entry_price, sl, tp, lot_size):
-    """
-    Executa ordem pendente com proteção de preenchimento (ORDER_FILLING_RETURN prioritário).
-    Caso a corretora exija modo específico, realiza fallback automático.
-    """
     info = mt5.symbol_info(symbol)
     if not info: return False, "Símbolo não localizado"
 
@@ -96,7 +91,6 @@ def send_limit_order(symbol, action, entry_price, sl, tp, lot_size):
 
     order_type = mt5.ORDER_TYPE_BUY_LIMIT if action == "BUY_LIMIT" else mt5.ORDER_TYPE_SELL_LIMIT
 
-    # Tentativa 1: ORDER_FILLING_RETURN (Padrão institucional aceito pela FTMO e corretores ECN)
     request = {
         "action": mt5.TRADE_ACTION_PENDING,
         "symbol": symbol,
@@ -116,19 +110,17 @@ def send_limit_order(symbol, action, entry_price, sl, tp, lot_size):
     if result.retcode == mt5.TRADE_RETCODE_DONE:
         return True, "Ordem armada com sucesso (RETURN)"
 
-    # Tentativa 2: Fallback caso retorne erro 10030 (Unsupported filling mode)
     if result.retcode == 10030:
-        modes = [mt5.ORDER_FILLING_IOC, mt5.ORDER_FILLING_FOK]
-        for mode in modes:
+        for mode in [mt5.ORDER_FILLING_IOC, mt5.ORDER_FILLING_FOK]:
             request["type_filling"] = mode
             result = mt5.order_send(request)
             if result.retcode == mt5.TRADE_RETCODE_DONE:
-                return True, f"Ordem armada com sucesso (Fallback Mode {mode})"
+                return True, f"Ordem armada com sucesso (Fallback {mode})"
 
     return False, f"Retcode {result.retcode} ({result.comment})"
 
 
-def purge_stale_pending_orders(max_age_minutes=8):
+def purge_stale_pending_orders(max_age_minutes=60):
     orders = mt5.orders_get()
     if not orders: return 0
 
@@ -184,7 +176,6 @@ def close_all_open_positions():
     return closed
 
 
-# Cache global para preservar o risco original de cada operação mesmo após o SL ser movido para o Break-Even
 POSITION_RISK_CACHE = {}
 
 def manage_open_trades(engine, risk_manager, settings):
@@ -200,7 +191,6 @@ def manage_open_trades(engine, risk_manager, settings):
         POSITION_RISK_CACHE.clear()
         return
 
-    # Limpa do cache tickets que já foram fechados
     current_tickets = {p.ticket for p in positions}
     POSITION_RISK_CACHE = {t: r for t, r in POSITION_RISK_CACHE.items() if t in current_tickets}
 
@@ -212,17 +202,15 @@ def manage_open_trades(engine, risk_manager, settings):
         open_price = p.price_open
         current_sl = p.sl
 
-        # Registra e congela o risco original do trade antes de qualquer alteração de SL
         if p.ticket not in POSITION_RISK_CACHE:
             if current_sl > 0:
                 raw_risk = abs(open_price - current_sl)
-                # Só registra se for uma distância coerente de stop (evita registrar o próprio BE)
                 if raw_risk > (open_price * 0.0002):
                     POSITION_RISK_CACHE[p.ticket] = raw_risk
 
         initial_risk = POSITION_RISK_CACHE.get(p.ticket, abs(open_price - current_sl) if current_sl > 0 else 0.0)
 
-        # 1. Trailing Stop M1 (Disparado apenas a partir de 1.5R do risco REAL)
+        # 1. Trailing Stop M1 (Disparado a partir de 1.5R)
         if trailing_enabled and initial_risk > 0:
             df_m1 = engine.get_candles(p.symbol, mt5.TIMEFRAME_M1, 3)
             if df_m1 is not None and len(df_m1) >= 2:
@@ -244,7 +232,7 @@ def manage_open_trades(engine, risk_manager, settings):
                         print(f"📈 [TRAILING 1.5R M1] #{p.ticket} ({p.symbol}) SL ajustado para {new_trail_sl}")
                     continue
 
-        # 2. Break-Even com validação estrita de 1.2R
+        # 2. Break-Even 1.2R
         if be_enabled and initial_risk > 0:
             if p.type == mt5.POSITION_TYPE_BUY and current_sl >= open_price: continue
             if p.type == mt5.POSITION_TYPE_SELL and current_sl > 0 and current_sl <= open_price: continue
@@ -262,6 +250,7 @@ def manage_open_trades(engine, risk_manager, settings):
                 res = mt5.order_send(req)
                 if res.retcode == mt5.TRADE_RETCODE_DONE:
                     print(f"🛡️ [BREAK-EVEN 1.2R] #{p.ticket} ({p.symbol}) SL protegido em {new_be_sl}")
+
 
 def get_performance_stats(risk_base=50.0):
     try:
@@ -300,11 +289,9 @@ def get_performance_stats(risk_base=50.0):
                         gross_loss_30d += abs(profit)
 
                     running_pnl += profit
-                    if running_pnl > peak_pnl:
-                        peak_pnl = running_pnl
+                    if running_pnl > peak_pnl: peak_pnl = running_pnl
                     dd = peak_pnl - running_pnl
-                    if dd > max_drawdown_usd:
-                        max_drawdown_usd = dd
+                    if dd > max_drawdown_usd: max_drawdown_usd = dd
 
                     if d.time >= start_of_today.timestamp():
                         today_realized_pnl += profit
@@ -382,7 +369,7 @@ def get_performance_stats(risk_base=50.0):
         }
 
 
-def run_recent_backtest(engine, symbol, days=0, risk_per_trade=50.0):
+def run_recent_backtest(engine, symbol, days=0, risk_per_trade=50.0, session_mode="KILLZONES"):
     if not symbol: return None
 
     broker_now = engine.get_broker_current_time(symbol)
@@ -456,8 +443,9 @@ def run_recent_backtest(engine, symbol, days=0, risk_per_trade=50.0):
                         if day_locked or daily_trade_count >= 5:
                             continue
 
+                        # Respeita o modo de sessão escolhido (24H ou KILLZONES)
                         if not InstitutionalSessionFilter.is_session_active(
-                            symbol, f['raw_time'], engine.broker_utc_offset_hours
+                            symbol, f['raw_time'], engine.broker_utc_offset_hours, session_mode=session_mode
                         ):
                             continue
 
@@ -613,13 +601,15 @@ def run_recent_backtest(engine, symbol, days=0, risk_per_trade=50.0):
         "timestamp": int(time.time()),
         "symbol": symbol,
         "days": days,
+        "session_mode": session_mode,
         "setups_mapped": len(all_fvgs),
         "trades_executed": best['trades_executed'] if best else 0,
         "base_risk": risk_per_trade,
         "strategy_info": {
             "mode": "Execução Sequencial (Max 5 Trades/Dia)",
             "frictions": f"Spread ({spread_pts:.2f}) + Slippage + Trava Meta/Loss",
-            "context": "Sessão Atual (Hoje)" if days == 0 else f"Histórico Real {days}D"
+            "context": "Sessão Atual (Hoje)" if days == 0 else f"Histórico Real {days}D",
+            "session": "24H (Full Day)" if session_mode == "24H" else "Killzones Institucionais (Londres/NY)"
         },
         "raio_x": raio_x_results,
         "with_be": get_subset(use_ce=True, be=True),
@@ -666,7 +656,6 @@ def main():
                 pnl_today = equity - balance
                 login, server = str(acc.login), acc.server
                 
-                # Defesa Ativa FTMO: Se violar o Soft Stop diário, liquida tudo imediatamente
                 breached, msg = risk_manager.update_account_state(balance, equity, broker_time)
                 if breached:
                     sync.add_log(None, f"⛔ [PROP SHIELD] {msg} — Liquidando posições e travando operações!", "DANGER")
@@ -677,16 +666,22 @@ def main():
             else:
                 balance, equity, pnl_today, login, server = 0, 0, 0, "--", "--"
 
-            is_news, news_title = news_filter.is_news_window_active(window_minutes=15)
-            if is_news:
-                purged = cancel_all_pending_orders()
-                if purged > 0:
-                    sync.add_log(None, f"📰 [NEWS SHIELD] {purged} ordens canceladas por anúncio: {news_title}", "WARN")
+            # Modo Fiel ao Backtest (se True, desliga travas eliminatórias extras)
+            raw_backtest_mode = bool(cached_settings.get("raw_backtest_mode", False))
+
+            is_news = False
+            if not raw_backtest_mode:
+                is_news, news_title = news_filter.is_news_window_active(window_minutes=15)
+                if is_news:
+                    purged = cancel_all_pending_orders()
+                    if purged > 0:
+                        sync.add_log(None, f"📰 [NEWS SHIELD] {purged} ordens canceladas por anúncio: {news_title}", "WARN")
 
             agora = time.time()
             if agora - last_hb >= 2.0:
                 last_hb = agora
-                purge_stale_pending_orders(max_age_minutes=8)
+                # No modo fiel aguarda 60m para dar tempo do pullback; no modo estrito 15m
+                purge_stale_pending_orders(max_age_minutes=60 if raw_backtest_mode else 15)
 
                 remote = sync.check_remote_settings()
                 if remote:
@@ -705,8 +700,9 @@ def main():
                             cat = "NASDAQ" if "US100" in parts[1] else "GOLD"
                             real_sym = engine.resolve_symbol(cat)
                             days = int(parts[2]) if len(parts) > 2 else 0
+                            session_sel = parts[3] if len(parts) > 3 else "KILLZONES"
 
-                            rep = run_recent_backtest(engine, real_sym, days, risk_manager.risk_per_trade_usd)
+                            rep = run_recent_backtest(engine, real_sym, days, risk_manager.risk_per_trade_usd, session_mode=session_sel)
                             if rep:
                                 try: sync.client.table("copilot_status").update({"last_backtest": rep}).eq("id", 1).execute()
                                 except: pass
@@ -724,13 +720,15 @@ def main():
                     "auto_ia": cached_settings.get("auto_profile_ia", False),
                     "profile": cached_settings.get("profile", "guardiao"),
                     "use_ce_50": cached_settings.get("use_ce_50", True),
-                    "require_sweep": cached_settings.get("require_sweep", False)
+                    "require_sweep": cached_settings.get("require_sweep", False),
+                    "session_mode": "KILLZONES"
                 }
                 gold_cfg = cached_settings.get("gold") or {
                     "auto_ia": cached_settings.get("auto_profile_ia", False),
                     "profile": cached_settings.get("profile", "tatico"),
                     "use_ce_50": cached_settings.get("use_ce_50", True),
-                    "require_sweep": cached_settings.get("require_sweep", False)
+                    "require_sweep": cached_settings.get("require_sweep", False),
+                    "session_mode": "24H"
                 }
 
                 dir_nasdaq = scout.get_directive("NASDAQ")
@@ -742,6 +740,7 @@ def main():
                         "profile": dir_nasdaq.get("recommended_profile", nasdaq_cfg.get("profile")) if nasdaq_cfg.get("auto_ia") else nasdaq_cfg.get("profile", "guardiao"),
                         "entry_type": "50% CE" if (dir_nasdaq.get("use_ce_50") if nasdaq_cfg.get("auto_ia") else nasdaq_cfg.get("use_ce_50", True)) else "Borda",
                         "require_sweep": dir_nasdaq.get("require_sweep") if nasdaq_cfg.get("auto_ia") else nasdaq_cfg.get("require_sweep", False),
+                        "session_mode": nasdaq_cfg.get("session_mode", "KILLZONES"),
                         "status": "AUTORIZADO" if (dir_nasdaq.get("should_trade") if nasdaq_cfg.get("auto_ia") else True) else "STAND-BY"
                     },
                     "gold": {
@@ -749,17 +748,18 @@ def main():
                         "profile": dir_gold.get("recommended_profile", gold_cfg.get("profile")) if gold_cfg.get("auto_ia") else gold_cfg.get("profile", "tatico"),
                         "entry_type": "50% CE" if (dir_gold.get("use_ce_50") if gold_cfg.get("auto_ia") else gold_cfg.get("use_ce_50", True)) else "Borda",
                         "require_sweep": dir_gold.get("require_sweep") if gold_cfg.get("auto_ia") else gold_cfg.get("require_sweep", False),
+                        "session_mode": gold_cfg.get("session_mode", "24H"),
                         "status": "AUTORIZADO" if (dir_gold.get("should_trade") if gold_cfg.get("auto_ia") else True) else "STAND-BY"
                     },
                     "breakeven": "ATIVO (1.2R)" if cached_settings.get("breakeven_enabled", True) else "DESLIGADO",
-                    "trailing": "ATIVO (M1)" if cached_settings.get("trailing_enabled", False) else "DESLIGADO"
+                    "trailing": "ATIVO (M1)" if cached_settings.get("trailing_enabled", False) else "DESLIGADO",
+                    "raw_backtest_mode": raw_backtest_mode
                 }
 
                 sync.send_heartbeat("hibrido", pnl_today, login, balance, equity, server, perf_data)
 
             manage_open_trades(engine, risk_manager, cached_settings)
 
-            # Trava total se o escudo diário ou notícia de alto impacto estiverem ativos
             if is_news or risk_manager.daily_lock_active:
                 time.sleep(1)
                 continue
@@ -781,19 +781,21 @@ def main():
                 if not spread_ok:
                     continue
 
-                use_sess = cached_settings.get("use_session_filter", True)
-                if use_sess and not InstitutionalSessionFilter.is_session_active(
-                    symbol, broker_time, engine.broker_utc_offset_hours
-                ):
-                    continue
-
                 cfg_key = "nasdaq" if category == "NASDAQ" else "gold"
                 asset_cfg = cached_settings.get(cfg_key) or {
                     "auto_ia": cached_settings.get("auto_profile_ia", False),
                     "profile": cached_settings.get("profile", "guardiao" if category == "NASDAQ" else "tatico"),
                     "use_ce_50": cached_settings.get("use_ce_50", True),
-                    "require_sweep": cached_settings.get("require_sweep", False)
+                    "require_sweep": cached_settings.get("require_sweep", False),
+                    "session_mode": "KILLZONES" if category == "NASDAQ" else "24H"
                 }
+
+                # Sessão Independente por Ativo
+                asset_session_mode = asset_cfg.get("session_mode", "KILLZONES")
+                if not InstitutionalSessionFilter.is_session_active(
+                    symbol, broker_time, engine.broker_utc_offset_hours, session_mode=asset_session_mode
+                ):
+                    continue
 
                 is_auto_asset = bool(asset_cfg.get("auto_ia", False))
                 directive = scout.get_directive(category)
@@ -833,7 +835,9 @@ def main():
                     if fvg_id in processed_fvgs:
                         continue
 
-                    if fvg.get('age_candles', 0) > 3:
+                    # Idade máxima tolerada: 12 candles (~1 hora) no modo fiel, 4 no estrito
+                    max_allowed_age = 12 if raw_backtest_mode else 4
+                    if fvg.get('age_candles', 0) > max_allowed_age:
                         processed_fvgs.add(fvg_id)
                         continue
 
@@ -844,18 +848,21 @@ def main():
                     direction = "BUY" if fvg['type'] == 'BULLISH' else "SELL"
                     entry_candidate = fvg['ce_50'] if use_ce_50 else (fvg['top'] if direction == "BUY" else fvg['bottom'])
 
-                    max_dist = 22.0 if any(x in symbol.upper() for x in ["US100", "NAS", "USTEC", "NQ"]) else 3.5
+                    # CORREÇÃO CRÍTICA DO BUG DE DISTÂNCIA:
+                    # Apenas pula se o preço atual estiver distante, MAS NUNCA adiciona em processed_fvgs prematuramente!
+                    max_dist = 25.0 if any(x in symbol.upper() for x in ["US100", "NAS", "USTEC", "NQ"]) else 4.5
                     dist = abs(current_price - entry_candidate)
                     if dist > max_dist:
-                        processed_fvgs.add(fvg_id)
                         continue
 
-                    if direction == "BUY" and "BEARISH" in structure:
-                        processed_fvgs.add(fvg_id)
-                        continue
-                    if direction == "SELL" and "BULLISH" in structure:
-                        processed_fvgs.add(fvg_id)
-                        continue
+                    # Filtro de M15 executado somente no modo blindado
+                    if not raw_backtest_mode:
+                        if direction == "BUY" and "BEARISH" in structure:
+                            processed_fvgs.add(fvg_id)
+                            continue
+                        if direction == "SELL" and "BULLISH" in structure:
+                            processed_fvgs.add(fvg_id)
+                            continue
 
                     params = risk_manager.get_trade_parameters(
                         active_profile_for_trade, fvg, atr, symbol, direction, use_ce_50=use_ce_50
@@ -867,19 +874,22 @@ def main():
                         sync.add_log(symbol, f"Descartado por visão: {path_msg}", "WARN")
                         continue
 
-                    ai_ok, ai_reason = ia_agent.quick_validate_trade(category, direction, active_profile_for_trade)
-                    if not ai_ok:
-                        processed_fvgs.add(fvg_id)
-                        sync.add_log(symbol, f"Bloqueado pela IA: {ai_reason}", "WARN")
-                        continue
+                    # Veto da IA Groq apenas no modo blindado
+                    if not raw_backtest_mode:
+                        ai_ok, ai_reason = ia_agent.quick_validate_trade(category, direction, active_profile_for_trade)
+                        if not ai_ok:
+                            processed_fvgs.add(fvg_id)
+                            sync.add_log(symbol, f"Bloqueado pela IA: {ai_reason}", "WARN")
+                            continue
 
                     action = "BUY_LIMIT" if direction == "BUY" else "SELL_LIMIT"
                     lot = risk_manager.calculate_lot_size(symbol, params["risk_points"])
 
                     ok, order_msg = send_limit_order(symbol, action, params["entry"], params["sl"], params["tp"], lot)
                     if ok:
-                        mode_tag = "IA 30D" if is_auto_asset else "MANUAL"
-                        sync.add_log(symbol, f"ORDEM ARMADA ({mode_tag} | {active_profile_for_trade.upper()}): {action} {lot}L @ {params['entry']}", "SUCCESS")
+                        mode_tag = "FIEL 1:1" if raw_backtest_mode else ("IA 30D" if is_auto_asset else "MANUAL")
+                        sess_tag = f"[{asset_session_mode}]"
+                        sync.add_log(symbol, f"ORDEM ARMADA {sess_tag} ({mode_tag} | {active_profile_for_trade.upper()}): {action} {lot}L @ {params['entry']}", "SUCCESS")
                         processed_fvgs.add(fvg_id)
                         break
                     else:

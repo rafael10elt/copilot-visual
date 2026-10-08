@@ -22,6 +22,7 @@ export default function Dashboard({
   const [showEmergencyModal, setShowEmergencyModal] = useState(false);
   const [selectedAsset, setSelectedAsset] = useState('US100');
   const [selectedDays, setSelectedDays] = useState(0);
+  const [selectedSessionMode, setSelectedSessionMode] = useState('KILLZONES');
   const [backtestViewTab, setBacktestViewTab] = useState('raio_x');
 
   const currentRiskBase = Number(settings?.risk_per_trade || 50);
@@ -68,20 +69,23 @@ export default function Dashboard({
       is_auto: false,
       profile: settings?.nasdaq?.profile || settings?.profile || 'guardiao',
       entry_type: '50% CE',
+      session_mode: 'KILLZONES',
       status: 'AUTORIZADO'
     },
     gold: {
       is_auto: false,
       profile: settings?.gold?.profile || settings?.profile || 'tatico',
       entry_type: '50% CE',
+      session_mode: '24H',
       status: 'AUTORIZADO'
     },
     breakeven: settings?.breakeven_enabled !== false ? "ATIVO (1.2R)" : "DESLIGADO",
-    trailing: settings?.trailing_enabled ? "ATIVO (M1)" : "DESLIGADO"
+    trailing: settings?.trailing_enabled ? "ATIVO (M1)" : "DESLIGADO",
+    raw_backtest_mode: !!settings?.raw_backtest_mode
   };
 
   const handleBacktestClick = () => {
-    onRunBacktest(selectedDays, selectedAsset);
+    onRunBacktest(selectedDays, selectedAsset, selectedSessionMode);
   };
 
   const anyIsNasdaq = (sym) => {
@@ -99,7 +103,8 @@ export default function Dashboard({
       auto_ia: false,
       profile: item.profile_key,
       use_ce_50: item.entry.includes('50%'),
-      require_sweep: item.sweep.includes('Com')
+      require_sweep: item.sweep.includes('Com'),
+      session_mode: latestBacktest?.session_mode || currentAssetConfig.session_mode || 'KILLZONES'
     };
 
     onUpdateSettings({
@@ -125,11 +130,10 @@ export default function Dashboard({
 
   return (
     <div className="relative">
-      {/* GRID RESPONSIVO: 1 coluna no mobile, 12 colunas no notebook */}
       <div className="space-y-4 lg:space-y-0 lg:grid lg:grid-cols-12 lg:gap-4 xl:gap-5">
         
         {/* ============================================================== */}
-        {/* COLUNA ESQUERDA (DADOS & ESTRATÉGIAS) — 7 Colunas em Notebook */}
+        {/* COLUNA ESQUERDA (DADOS & ESTRATÉGIAS) — 7 Colunas */}
         {/* ============================================================== */}
         <div className="space-y-4 lg:col-span-7 xl:col-span-7">
           
@@ -224,22 +228,22 @@ export default function Dashboard({
                   Estratégia Operacional em Execução
                 </h4>
               </div>
-              <span className="text-[10px] font-mono text-zinc-400">
-                Break-Even: <strong className={activeStrategy.breakeven.includes("ATIVO") ? "text-emerald-400" : "text-zinc-500"}>{activeStrategy.breakeven}</strong>
+              <span className={`text-[10px] font-mono px-2 py-0.5 rounded font-bold border ${
+                activeStrategy.raw_backtest_mode
+                  ? 'bg-amber-500/10 text-amber-300 border-amber-500/30'
+                  : 'bg-zinc-800 text-zinc-400 border-zinc-700'
+              }`}>
+                {activeStrategy.raw_backtest_mode ? "FIEL AO BACKTEST (1:1)" : "BLINDAGEM MESA"}
               </span>
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              {/* PAINEL NASDAQ */}
+              {/* NASDAQ */}
               <div className="bg-zinc-950 p-3.5 rounded-xl border border-zinc-800/80 space-y-2">
                 <div className="flex items-center justify-between border-b border-zinc-800/60 pb-1.5">
                   <strong className="text-xs text-zinc-200 font-mono">NASDAQ (US100)</strong>
-                  <span className={`text-[8px] font-mono font-bold px-1.5 py-0.5 rounded border ${
-                    activeStrategy.nasdaq.is_auto 
-                      ? 'bg-violet-500/20 text-violet-300 border-violet-500/40' 
-                      : 'bg-zinc-800 text-zinc-300 border-zinc-700'
-                  }`}>
-                    {activeStrategy.nasdaq.is_auto ? '🤖 AUTO IA (30D)' : '👤 MANUAL'}
+                  <span className="text-[8px] font-mono font-bold px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-300 border border-zinc-700">
+                    {activeStrategy.nasdaq.session_mode || 'KILLZONES'}
                   </span>
                 </div>
                 
@@ -265,16 +269,12 @@ export default function Dashboard({
                 </div>
               </div>
 
-              {/* PAINEL XAUUSD (GOLD) */}
+              {/* XAUUSD */}
               <div className="bg-zinc-950 p-3.5 rounded-xl border border-zinc-800/80 space-y-2">
                 <div className="flex items-center justify-between border-b border-zinc-800/60 pb-1.5">
                   <strong className="text-xs text-zinc-200 font-mono">XAUUSD (GOLD)</strong>
-                  <span className={`text-[8px] font-mono font-bold px-1.5 py-0.5 rounded border ${
-                    activeStrategy.gold.is_auto 
-                      ? 'bg-violet-500/20 text-violet-300 border-violet-500/40' 
-                      : 'bg-zinc-800 text-zinc-300 border-zinc-700'
-                  }`}>
-                    {activeStrategy.gold.is_auto ? '🤖 AUTO IA (30D)' : '👤 MANUAL'}
+                  <span className="text-[8px] font-mono font-bold px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-300 border border-zinc-700">
+                    {activeStrategy.gold.session_mode || '24H'}
                   </span>
                 </div>
 
@@ -302,7 +302,7 @@ export default function Dashboard({
             </div>
           </div>
 
-          {/* 4. CONTADORES REAIS DO DIA (TODAY'S PERFORMANCE) */}
+          {/* 4. CONTADORES REAIS DO DIA */}
           <div className="bg-zinc-900/90 border border-zinc-800 p-4 rounded-2xl shadow-xl space-y-3">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
@@ -374,44 +374,15 @@ export default function Dashboard({
                 </div>
               )}
             </div>
-
-            {/* Histórico Recente */}
-            {stats.closed_trades && stats.closed_trades.length > 0 && (
-              <div>
-                <span className="text-[10px] font-mono text-zinc-400 uppercase tracking-wider block mb-1.5">
-                  Recent Closed Deals
-                </span>
-                <div className="space-y-1 max-h-32 overflow-y-auto no-scrollbar pr-1">
-                  {stats.closed_trades.map((deal) => (
-                    <div key={deal.ticket} className="bg-zinc-950/80 border border-zinc-800/50 p-2 rounded-lg flex items-center justify-between text-[10px] font-mono">
-                      <div className="flex items-center gap-1.5">
-                        <Clock size={10} className="text-zinc-500" />
-                        <span className="text-zinc-400">{deal.time}</span>
-                        <strong className="text-zinc-300">{deal.symbol}</strong>
-                        <span className={deal.type === 'BUY' ? 'text-emerald-400' : 'text-rose-400'}>({deal.type})</span>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <span className={`text-[9px] font-bold ${deal.r_multiple >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                          {deal.r_multiple >= 0 ? `+${deal.r_multiple}R` : `${deal.r_multiple}R`}
-                        </span>
-                        <strong className={deal.profit >= 0 ? 'text-emerald-400' : 'text-rose-400'}>
-                          {deal.profit >= 0 ? `+$${deal.profit.toFixed(2)}` : `-$${Math.abs(deal.profit).toFixed(2)}`}
-                        </strong>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
           </div>
         </div>
 
         {/* ============================================================== */}
-        {/* COLUNA DIREITA (RADAR, BACKTEST & CONTROLES) — 5 Colunas em Notebook */}
+        {/* COLUNA DIREITA (RADAR, BACKTEST & CONTROLES) — 5 Colunas */}
         {/* ============================================================== */}
         <div className="space-y-4 lg:col-span-5 xl:col-span-5">
           
-          {/* 5. PLACAR PNL & SALDO DO DIA */}
+          {/* 5. PLACAR PNL & SALDO */}
           <div className="grid grid-cols-2 gap-3">
             <div className="bg-zinc-900/90 border border-zinc-800 p-3.5 rounded-2xl shadow-lg">
               <span className="text-[10px] font-mono text-zinc-500 uppercase block">Account Balance</span>
@@ -428,7 +399,7 @@ export default function Dashboard({
             </div>
           </div>
 
-          {/* 6. RADAR DO STRATEGY SCOUT (30D) */}
+          {/* 6. RADAR STRATEGY SCOUT (30D) */}
           <div className="bg-zinc-900/90 border border-zinc-800 p-4 rounded-2xl shadow-xl space-y-2.5">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
@@ -442,7 +413,6 @@ export default function Dashboard({
 
             {scoutDirectives ? (
               <div className="space-y-2">
-                {/* NASDAQ CARD */}
                 <div className="bg-zinc-950 p-2.5 rounded-xl border border-zinc-800/80 space-y-1">
                   <div className="flex items-center justify-between">
                     <span className="text-[10px] font-bold text-zinc-300 font-mono">NASDAQ (US100)</span>
@@ -463,7 +433,6 @@ export default function Dashboard({
                   </div>
                 </div>
 
-                {/* GOLD CARD */}
                 <div className="bg-zinc-950 p-2.5 rounded-xl border border-zinc-800/80 space-y-1">
                   <div className="flex items-center justify-between">
                     <span className="text-[10px] font-bold text-zinc-300 font-mono">XAUUSD (GOLD)</span>
@@ -486,7 +455,7 @@ export default function Dashboard({
               </div>
             ) : (
               <div className="p-3 bg-zinc-950/60 rounded-xl text-center text-[10px] font-mono text-zinc-500">
-                Strategy Scout calibrando permutações de 30 dias...
+                Strategy Scout calibrando permutações...
               </div>
             )}
           </div>
@@ -507,6 +476,7 @@ export default function Dashboard({
               )}
             </div>
 
+            {/* Ativo */}
             <div>
               <span className="text-[10px] font-mono text-zinc-400 block mb-1.5 uppercase">Ativo</span>
               <div className="grid grid-cols-2 gap-2">
@@ -531,6 +501,32 @@ export default function Dashboard({
               </div>
             </div>
 
+            {/* Sessão */}
+            <div>
+              <span className="text-[10px] font-mono text-zinc-400 block mb-1.5 uppercase">Filtro de Sessão</span>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  onClick={() => setSelectedSessionMode('KILLZONES')}
+                  className={`py-1.5 rounded-xl text-xs font-mono font-bold border transition-all ${
+                    selectedSessionMode === 'KILLZONES'
+                      ? 'bg-emerald-500/10 border-emerald-500/40 text-emerald-300'
+                      : 'bg-zinc-950 border-zinc-800/80 text-zinc-500 hover:text-zinc-300'
+                  }`}>
+                  Killzones (Londres/NY)
+                </button>
+                <button
+                  onClick={() => setSelectedSessionMode('24H')}
+                  className={`py-1.5 rounded-xl text-xs font-mono font-bold border transition-all ${
+                    selectedSessionMode === '24H'
+                      ? 'bg-amber-500/10 border-amber-500/40 text-amber-300'
+                      : 'bg-zinc-950 border-zinc-800/80 text-zinc-500 hover:text-zinc-300'
+                  }`}>
+                  24H (Sem Filtro)
+                </button>
+              </div>
+            </div>
+
+            {/* Janela de Teste */}
             <div>
               <span className="text-[10px] font-mono text-zinc-400 block mb-1.5 uppercase">Janela de Teste</span>
               <div className="grid grid-cols-5 gap-1.5">
@@ -562,12 +558,12 @@ export default function Dashboard({
               {isBacktestLoading ? (
                 <>
                   <Loader2 size={14} className="animate-spin text-amber-400" />
-                  <span>Calculando Execução ({selectedAsset} • {formatDaysLabel(selectedDays)})...</span>
+                  <span>Calculando Execução ({selectedAsset} • {selectedSessionMode} • {formatDaysLabel(selectedDays)})...</span>
                 </>
               ) : (
                 <>
                   <BarChart3 size={14} />
-                  <span>Executar Sandbox ({selectedAsset} • {formatDaysLabel(selectedDays)})</span>
+                  <span>Executar Sandbox ({selectedAsset} • {selectedSessionMode} • {formatDaysLabel(selectedDays)})</span>
                 </>
               )}
             </button>
@@ -582,7 +578,7 @@ export default function Dashboard({
         </div>
       </div>
 
-      {/* 9. MODAL DO RELATÓRIO REALISTA EXPANSIVO */}
+      {/* 9. MODAL RELATÓRIO REALISTA */}
       {showReportModal && (
         <div className="fixed inset-0 bg-black/85 backdrop-blur-sm z-50 flex items-center justify-center p-2 sm:p-4">
           <div className="bg-zinc-900 border border-zinc-800 w-full max-w-xl lg:max-w-2xl xl:max-w-3xl rounded-2xl p-4 sm:p-6 shadow-2xl relative space-y-4 max-h-[92vh] overflow-y-auto no-scrollbar">
@@ -616,6 +612,8 @@ export default function Dashboard({
                       <span>Mapeados: <strong className="text-zinc-300">{latestBacktest.setups_mapped}</strong></span>
                       <span>•</span>
                       <span>Executados: <strong className="text-emerald-400 font-bold">{latestBacktest.trades_executed}</strong></span>
+                      <span>•</span>
+                      <span>Sessão: <strong className="text-amber-300 font-bold">{latestBacktest.session_mode || 'KILLZONES'}</strong></span>
                       <span>•</span>
                       <span>Risco: ${latestBacktest.base_risk || currentRiskBase}</span>
                     </div>
@@ -698,7 +696,7 @@ export default function Dashboard({
 
                             <button
                               onClick={() => applyCustomStrategy(item)}
-                              title={`Aplicar apenas no ${latestBacktest.symbol}`}
+                              title={`Aplicar no ${latestBacktest.symbol}`}
                               className="px-2 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-[10px] text-zinc-200 font-bold">
                               Usar
                             </button>

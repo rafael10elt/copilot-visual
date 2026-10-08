@@ -1,23 +1,26 @@
 import React, { useState } from 'react';
-import { Crosshair, ShieldCheck, Zap, Bot, Sliders, Layers, Target, Clock, Cpu } from 'lucide-react';
+import { Crosshair, ShieldCheck, Zap, Bot, Sliders, Target, Clock, ShieldAlert } from 'lucide-react';
 
 export default function ControlPanel({ settings, onUpdateSettings }) {
   const [selectedAssetTab, setSelectedAssetTab] = useState('nasdaq');
 
   const activeMode = settings?.active_symbol_mode || 'BOTH';
+  const isRawMode = !!settings?.raw_backtest_mode;
 
   const nasdaqCfg = settings?.nasdaq || {
     auto_ia: !!settings?.auto_profile_ia,
     profile: settings?.profile || 'guardiao',
     use_ce_50: settings?.use_ce_50 !== false,
-    require_sweep: !!settings?.require_sweep
+    require_sweep: !!settings?.require_sweep,
+    session_mode: 'KILLZONES'
   };
 
   const goldCfg = settings?.gold || {
     auto_ia: !!settings?.auto_profile_ia,
     profile: settings?.profile || 'tatico',
     use_ce_50: settings?.use_ce_50 !== false,
-    require_sweep: !!settings?.require_sweep
+    require_sweep: !!settings?.require_sweep,
+    session_mode: '24H'
   };
 
   const handleUpdateAssetField = (assetKey, field, value) => {
@@ -37,10 +40,41 @@ export default function ControlPanel({ settings, onUpdateSettings }) {
 
   return (
     <div className="space-y-4 lg:space-y-0 lg:grid lg:grid-cols-12 lg:gap-4 xl:gap-5">
+      
       {/* ============================================================== */}
-      {/* COLUNA ESQUERDA (LIMITES & REGRAS GLOBAIS) — 5 Colunas em Notebook */}
+      {/* COLUNA ESQUERDA (LIMITES & REGRAS GLOBAIS) — 5 Colunas */}
       {/* ============================================================== */}
       <div className="space-y-4 lg:col-span-5">
+
+        {/* 0. SELETOR MASTER: FIEL AO BACKTEST VS BLINDAGEM MESA */}
+        <div className={`p-4 rounded-2xl border transition-all shadow-xl ${
+          isRawMode 
+            ? 'bg-amber-950/20 border-amber-500/40 text-amber-200' 
+            : 'bg-zinc-900/90 border-zinc-800 text-zinc-300'
+        }`}>
+          <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center gap-2">
+              <Target size={18} className={isRawMode ? "text-amber-400" : "text-violet-400"} />
+              <strong className="text-xs font-mono uppercase tracking-wider text-zinc-100">
+                {isRawMode ? 'MODO FIEL AO BACKTEST (1:1)' : 'MODO BLINDAGEM MESA'}
+              </strong>
+            </div>
+            <button
+              onClick={() => handleToggleGlobal('raw_backtest_mode')}
+              className={`px-3 py-1 rounded-xl text-[10px] font-mono font-bold border transition-all ${
+                isRawMode 
+                  ? 'bg-amber-500/30 text-amber-300 border-amber-500/50' 
+                  : 'bg-zinc-800 text-zinc-400 border-zinc-700'
+              }`}>
+              {isRawMode ? 'ATIVO (FIEL)' : 'ATIVAR FIEL'}
+            </button>
+          </div>
+          <p className="text-[10px] text-zinc-400 leading-relaxed font-mono">
+            {isRawMode
+              ? 'Opera estritamente como no Sandbox: desativa vetos da IA Groq, estrutura M15 e cancelamento por notícias.'
+              : 'Blindagem total ativa: usa filtros adicionais de M15, notícias de alto impacto e veto da IA Groq.'}
+          </p>
+        </div>
         
         {/* 1. ATIVOS A OPERAR */}
         <div className="bg-zinc-900/90 border border-zinc-800 rounded-2xl p-4">
@@ -70,7 +104,7 @@ export default function ControlPanel({ settings, onUpdateSettings }) {
               2. Risk & Prop Firm Targets
             </label>
             <span className="text-[9px] bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-1.5 py-0.5 rounded font-mono font-bold">
-              CHALLENGE RULES
+              PROP FIRM RULES
             </span>
           </div>
 
@@ -124,7 +158,7 @@ export default function ControlPanel({ settings, onUpdateSettings }) {
         {/* 4. EXECUTION GUARDS (GLOBAIS) */}
         <div className="bg-zinc-900/90 border border-zinc-800 rounded-2xl p-4 space-y-3">
           <label className="text-[11px] font-mono uppercase tracking-wider text-zinc-400 block mb-1">
-            4. Execution Guards (Globais)
+            4. Execution Guards (Proteções de Capital)
           </label>
 
           <div className="flex items-center justify-between py-1.5 border-b border-zinc-800/60">
@@ -140,7 +174,7 @@ export default function ControlPanel({ settings, onUpdateSettings }) {
             />
           </div>
 
-          <div className="flex items-center justify-between py-1.5 border-b border-zinc-800/60">
+          <div className="flex items-center justify-between py-1.5">
             <div>
               <strong className="text-xs text-zinc-200 block">Trailing Stop (M1)</strong>
               <span className="text-[10px] text-zinc-500 block">Rastreia vela a vela após atingir 1.5R</span>
@@ -152,24 +186,11 @@ export default function ControlPanel({ settings, onUpdateSettings }) {
               className="w-5 h-5 accent-blue-600 rounded cursor-pointer"
             />
           </div>
-
-          <div className="flex items-center justify-between py-1.5">
-            <div>
-              <strong className="text-xs text-zinc-200 block">Filtrar por Killzones</strong>
-              <span className="text-[10px] text-zinc-500 block">Opera apenas nas janelas de Londres e NY em UTC</span>
-            </div>
-            <input
-              type="checkbox"
-              checked={settings?.use_session_filter !== false}
-              onChange={() => handleToggleGlobal('use_session_filter')}
-              className="w-5 h-5 accent-emerald-600 rounded cursor-pointer"
-            />
-          </div>
         </div>
       </div>
 
       {/* ============================================================== */}
-      {/* COLUNA DIREITA (MOTOR HÍBRIDO POR ATIVO) — 7 Colunas em Notebook */}
+      {/* COLUNA DIREITA (MOTOR HÍBRIDO POR ATIVO) — 7 Colunas */}
       {/* ============================================================== */}
       <div className="space-y-4 lg:col-span-7">
         
@@ -177,10 +198,10 @@ export default function ControlPanel({ settings, onUpdateSettings }) {
         <div className="bg-zinc-900/90 border border-zinc-800 rounded-2xl p-4 lg:p-5 space-y-4">
           <div className="flex items-center justify-between">
             <label className="text-[11px] font-mono uppercase tracking-wider text-zinc-400 block">
-              3. Asset Strategy Engine
+              3. Independent Asset Engine
             </label>
             <span className="text-[9px] bg-violet-500/10 text-violet-300 border border-violet-500/20 px-2 py-0.5 rounded font-mono font-bold">
-              HÍBRIDO / INDEPENDENTE
+              DNA INDEPENDENTE
             </span>
           </div>
 
@@ -208,6 +229,45 @@ export default function ControlPanel({ settings, onUpdateSettings }) {
             </button>
           </div>
 
+          {/* SESSÃO DESTE ATIVO ESPECÍFICO */}
+          <div className="bg-zinc-950 p-3.5 rounded-xl border border-zinc-800 space-y-2">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Clock size={15} className="text-zinc-400" />
+                <span className="text-xs font-mono font-bold text-zinc-200">
+                  Horário de Operação ({selectedAssetTab === 'nasdaq' ? 'NASDAQ' : 'GOLD'}):
+                </span>
+              </div>
+              <span className="text-[9px] font-mono text-zinc-500">Relógio do MT5</span>
+            </div>
+
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                onClick={() => handleUpdateAssetField(selectedAssetTab, 'session_mode', 'KILLZONES')}
+                className={`py-2 rounded-xl text-[11px] font-mono font-bold border transition-all ${
+                  (currentCfg.session_mode || 'KILLZONES') === 'KILLZONES'
+                    ? 'bg-emerald-500/10 border-emerald-500/40 text-emerald-300'
+                    : 'bg-zinc-900 border-zinc-800 text-zinc-500 hover:text-zinc-300'
+                }`}>
+                KILLZONES (Londres/NY)
+              </button>
+              <button
+                onClick={() => handleUpdateAssetField(selectedAssetTab, 'session_mode', '24H')}
+                className={`py-2 rounded-xl text-[11px] font-mono font-bold border transition-all ${
+                  currentCfg.session_mode === '24H'
+                    ? 'bg-amber-500/10 border-amber-500/40 text-amber-300'
+                    : 'bg-zinc-900 border-zinc-800 text-zinc-500 hover:text-zinc-300'
+                }`}>
+                24 HORAS (Sem Filtro)
+              </button>
+            </div>
+            <span className="text-[10px] text-zinc-500 block">
+              {currentCfg.session_mode === '24H' 
+                ? 'Opera a qualquer momento (inclusive madrugada e Ásia), exceto no fechamento/rollover diário.'
+                : 'Filtra horários nobres de alta volatilidade e spreads baixos.'}
+            </span>
+          </div>
+
           {/* Toggle Modo do Ativo */}
           <div className="bg-zinc-950/70 p-3.5 rounded-xl border border-zinc-800/80 space-y-2">
             <div className="flex items-center justify-between">
@@ -220,7 +280,7 @@ export default function ControlPanel({ settings, onUpdateSettings }) {
                 </div>
                 <span className="text-[10px] text-zinc-400 block mt-0.5">
                   {currentCfg.auto_ia 
-                    ? 'A IA analisa 30 dias de pregão e calibra o setup com maior Prop Score.'
+                    ? 'A IA calibra o setup com maior Prop Score dos últimos 30 dias.'
                     : 'Você define o perfil e os parâmetros fixos para este ativo.'}
                 </span>
               </div>

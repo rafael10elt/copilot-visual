@@ -16,12 +16,10 @@ export default function App() {
   const [logs, setLogs] = useState([]);
   const [soundEnabled, setSoundEnabled] = useState(false);
 
-  // Estados do Modal e Backtest
   const [latestBacktest, setLatestBacktest] = useState(null);
   const [showReportModal, setShowReportModal] = useState(false);
   const [isBacktestLoading, setIsBacktestLoading] = useState(false);
 
-  // Trava para evitar reabertura automática
   const isAwaitingBacktestRef = useRef(false);
   const lastSeenBacktestTimestampRef = useRef(null);
 
@@ -95,7 +93,7 @@ export default function App() {
     await supabase.from('copilot_settings').update({ command: "EMERGENCY_STOP" }).eq('id', 1);
   };
 
-  const handleRunBacktest = async (days = 2, asset = 'US100') => {
+  const handleRunBacktest = async (days = 0, asset = 'US100', sessionMode = 'KILLZONES') => {
     const symbolTarget = asset === 'US100' ? 'US100.cash' : 'XAUUSD';
 
     isAwaitingBacktestRef.current = true;
@@ -103,7 +101,7 @@ export default function App() {
     setShowReportModal(true);
 
     await supabase.from('copilot_settings').update({
-      command: `RUN_BACKTEST:${symbolTarget}:${days}`
+      command: `RUN_BACKTEST:${symbolTarget}:${days}:${sessionMode}`
     }).eq('id', 1);
 
     setTimeout(() => {
@@ -136,7 +134,6 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100 flex flex-col items-center p-3 sm:p-5 lg:p-6 xl:p-8 antialiased select-none font-sans">
-      {/* HEADER RESPONSIVO: max-w-md no mobile, max-w-7xl no notebook */}
       <header className="w-full max-w-md lg:max-w-6xl xl:max-w-7xl bg-zinc-900/90 border border-zinc-800 rounded-2xl p-3.5 lg:p-4 mb-3 lg:mb-4 flex items-center justify-between shadow-xl">
         <div className="flex items-center gap-2.5">
           <div className="p-2 bg-violet-500/10 border border-violet-500/20 text-violet-400 rounded-xl">
@@ -157,7 +154,6 @@ export default function App() {
         </button>
       </header>
 
-      {/* BARRA DE NAVEGAÇÃO EXPANDIDA */}
       <nav className="w-full max-w-md lg:max-w-6xl xl:max-w-7xl grid grid-cols-3 gap-1.5 p-1 bg-zinc-900 border border-zinc-800 rounded-xl mb-4 lg:mb-5 text-xs font-bold font-mono">
         <button
           onClick={() => setTab('dashboard')}
@@ -182,7 +178,6 @@ export default function App() {
         </button>
       </nav>
 
-      {/* ÁREA PRINCIPAL EXPANSÍVEL */}
       <main className="w-full max-w-md lg:max-w-6xl xl:max-w-7xl flex-1">
         {tab === 'dashboard' && (
           <Dashboard

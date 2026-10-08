@@ -1,4 +1,4 @@
-# mt5_core.py — Conexão, Killzones com DST Dinâmico dos EUA, Filtro de Spread e Visão Computacional Corrigida
+# mt5_core.py — Conexão Universal MT5, Calibração Dinâmica de Horário do Broker e Visão Computacional
 import MetaTrader5 as mt5
 import pandas as pd
 import numpy as np
@@ -15,7 +15,7 @@ class MT5Engine:
     def __init__(self):
         self.connected = False
         self.symbol_cache = {}
-        self.broker_utc_offset_hours = 2  # Padrão EET (GMT+2 / GMT+3)
+        self.broker_utc_offset_hours = 0  # Calibrado diretamente via relógio do MT5
 
     def start(self):
         print("[MT5] Conectando ao terminal MetaTrader 5...")
@@ -39,21 +39,26 @@ class MT5Engine:
             print("[MT5] Conexão encerrada.")
 
     def _calibrate_broker_utc_offset(self):
-        """Calcula a diferença entre o servidor e UTC com proteção contra ticks antigos de fins de semana."""
-        tick = mt5.symbol_info_tick("EURUSD") or mt5.symbol_info_tick("XAUUSD")
-        if tick and tick.time > 0:
-            now_utc = datetime.now(timezone.utc).timestamp()
-            diff_seconds = tick.time - now_utc
+        """
+        Calcula a diferença exata entre o relógio interno do MT5 e o horário UTC real.
+        Funciona para qualquer mesa proprietária (FTMO, FundedNext, Topstep, MyFundedFX, etc.).
+        """
+        for sym_probe in ["EURUSD", "XAUUSD", "US100", "BTCUSD"]:
+            tick = mt5.symbol_info_tick(sym_probe)
+            if tick and tick.time > 0:
+                now_utc = datetime.now(timezone.utc).timestamp()
+                diff_seconds = tick.time - now_utc
 
-            if abs(diff_seconds) < 43200:
-                diff_hours = round(diff_seconds / 3600.0)
-                if -5 <= diff_hours <= 5:
+                # Se o tick não for de fim de semana (desvio menor que 36 horas)
+                if abs(diff_seconds) < 129600:
+                    diff_hours = int(round(diff_seconds / 3600.0))
                     self.broker_utc_offset_hours = diff_hours
-                    print(f"🌐 [TIME SYNC] Offset do servidor calibrado: UTC{'+' if diff_hours >= 0 else ''}{diff_hours}")
+                    print(f"🌐 [TIME SYNC MT5] Servidor: {mt5.account_info().server} | Offset detectado: UTC{'+' if diff_hours >= 0 else ''}{diff_hours}")
                     return
 
+        # Fallback para EET (+2 Inverno / +3 Verão)
         self.broker_utc_offset_hours = 2
-        print(f"🌐 [TIME SYNC] Usando offset padrão: UTC+{self.broker_utc_offset_hours}")
+        print(f"🌐 [TIME SYNC MT5] Fallback padrão aplicado: UTC+{self.broker_utc_offset_hours}")
 
     def resolve_symbol(self, category):
         if category in self.symbol_cache:
@@ -122,7 +127,7 @@ class MT5Engine:
         spread_pts = info.spread * point
         is_nasdaq = any(x in symbol.upper() for x in ["US100", "NAS", "USTEC", "NQ"])
 
-        max_allowed = 3.5 if is_nasdaq else 0.45
+        max_allowed = 4.0 if is_nasdaq else 0.50
         if spread_pts > max_allowed:
             return False, f"Spread excessivo ({spread_pts:.2f} pts > teto {max_allowed} pts)"
 
@@ -141,21 +146,27 @@ class InstitutionalSessionFilter:
         return second_sunday_march <= dt_utc.replace(tzinfo=None) < first_sunday_nov
 
     @classmethod
-    def is_session_active(cls, symbol, broker_candle_time, broker_utc_offset=2):
+    def is_session_active(cls, symbol, broker_candle_time, broker_utc_offset=2, session_mode="KILLZONES"):
+        """
+        Verifica a janela operacional considerando o modo:
+        - "24H": Opera a qualquer hora, exceto rollover crítico (21:55 às 22:15 UTC).
+        - "KILLZONES": Janelas nobres de alta liquidez.
+        """
         candle_utc = broker_candle_time - timedelta(hours=broker_utc_offset)
         utc_hour = candle_utc.hour
         utc_minute = candle_utc.minute
 
-        # Bloqueio estrito de rollover institucional (21h às 02h UTC)
-        if utc_hour >= 21 or utc_hour < 2:
+        # Proteção Universal: Fechamento diário e spread blowout (21:50 às 22:15 UTC)
+        if (utc_hour == 21 and utc_minute >= 50) or (utc_hour == 22 and utc_minute <= 15):
             return False
+
+        if session_mode == "24H":
+            return True
 
         is_nasdaq = any(x in symbol.upper() for x in ["US100", "NAS", "USTEC", "NQ"])
 
         if is_nasdaq:
             is_dst = cls.is_us_daylight_saving(candle_utc)
-            # EDT (Verão EUA): 09:30 EDT = 13:30 UTC
-            # EST (Inverno EUA): 09:30 EST = 14:30 UTC
             ny_open_hour = 13 if is_dst else 14
             ny_close_hour = 17 if is_dst else 18
 
@@ -163,9 +174,9 @@ class InstitutionalSessionFilter:
                 return True
             return False
         else:
-            # XAUUSD: Londres (07:00 às 10:30 UTC) e Nova York (12:30 às 16:30 UTC)
-            london = (7 <= utc_hour < 10) or (utc_hour == 10 and utc_minute <= 30)
-            ny = (12 <= utc_hour < 16) or (utc_hour == 16 and utc_minute <= 30)
+            # XAUUSD: Londres (07:00 às 11:00 UTC) e Nova York (12:30 às 17:00 UTC)
+            london = (7 <= utc_hour < 11)
+            ny = (12 <= utc_hour < 17) or (utc_hour == 12 and utc_minute >= 30)
             return london or ny
 
 
@@ -193,14 +204,9 @@ class VisionLiquidityAnalyzer:
         self.res = resolution
 
     def validate_liquidity_path(self, df, direction, entry_price, tp_price):
-        """
-        Escala normalizada dinâmica: garante que entry e TP nunca sejam esmagados nos limites
-        da matriz mesmo em perfis de alvo longo (Sniper 1:4).
-        """
         if df is None or len(df) < 15:
             return True, "Candles insuficientes"
 
-        # Inclui os níveis operacionais na amplitude global do mapa
         min_p = min(float(df['low'].min()), float(entry_price), float(tp_price))
         max_p = max(float(df['high'].max()), float(entry_price), float(tp_price))
         p_range = max_p - min_p if max_p > min_p else 1.0
@@ -215,7 +221,6 @@ class VisionLiquidityAnalyzer:
             y_open = int((1.0 - (row['open'] - min_p) / p_range) * (self.res[1] - 1))
             y_close = int((1.0 - (row['close'] - min_p) / p_range) * (self.res[1] - 1))
 
-            # Garante limites válidos na matriz
             y_high = max(0, min(self.res[1] - 1, y_high))
             y_low = max(0, min(self.res[1] - 1, y_low))
             y_open = max(0, min(self.res[1] - 1, y_open))
@@ -240,7 +245,7 @@ class VisionLiquidityAnalyzer:
         path_zone = grid[y_start : y_end + 1, :]
         density = np.sum(path_zone >= 1.0) / (path_zone.size + 1e-5)
 
-        if density > 0.58:
+        if density > 0.62:
             return False, f"Absorção densa ({density:.1%})"
 
         return True, "Livre"
