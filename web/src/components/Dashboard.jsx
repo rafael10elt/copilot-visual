@@ -147,7 +147,7 @@ export default function Dashboard({
         {/* ============================================================== */}
         <div className="space-y-4 lg:col-span-7 xl:col-span-7">
           
-          {/* 1. CARD CONTA FTMO */}
+          {/* 1. CARD CONTA DINÂMICA (HOT-SWAP COMPATIBLE) */}
           <div className="bg-zinc-900/90 border border-zinc-800 p-4 rounded-2xl flex items-center justify-between shadow-xl">
             <div className="flex items-center gap-3">
               <div className="p-2.5 rounded-xl bg-violet-500/10 border border-violet-500/20 text-violet-400">
@@ -155,15 +155,26 @@ export default function Dashboard({
               </div>
               <div>
                 <div className="flex items-center gap-2">
-                  <span className="text-xs font-bold text-zinc-200 font-mono">FTMO #{status?.account_login || '1514861405'}</span>
+                  <span className="text-xs font-bold text-zinc-200 font-mono">
+                    {status?.broker ? status.broker.split('-')[0] : 'CORRETORA'} #{status?.account_login || '--'}
+                  </span>
                   <span className={`w-2 h-2 rounded-full ${isOnline ? 'bg-emerald-400 animate-pulse' : 'bg-rose-500'}`} />
+                  {stats?.daily_lock_active && (
+                    <span className="text-[9px] font-bold px-1.5 py-0.2 rounded bg-rose-500/20 text-rose-400 border border-rose-500/30">
+                      TRAVA ATIVA
+                    </span>
+                  )}
                 </div>
-                <p className="text-[10px] text-zinc-500 font-mono">{status?.broker || 'FTMO-Demo'} • {isOnline ? 'ONLINE' : 'OFFLINE'}</p>
+                <p className="text-[10px] text-zinc-500 font-mono">
+                  {status?.broker || 'Servidor'} • {isOnline ? 'ONLINE' : 'OFFLINE'}
+                </p>
               </div>
             </div>
             <div className="text-right">
               <span className="text-[10px] text-zinc-500 font-mono block">EQUITY TOTAL</span>
-              <strong className="text-base font-black text-zinc-100 font-mono">${status?.account_equity || '0.00'}</strong>
+              <strong className="text-base font-black text-zinc-100 font-mono">
+                {status?.account_equity || '0.00'} {stats?.currency || 'USD'}
+              </strong>
             </div>
           </div>
 

@@ -1,4 +1,4 @@
-# main.py — Orquestrador HFT com Telemetria de Ordens Pendentes ($ TP/$ SL), Cancelamento Seletivo e Paridade 1:1
+# main.py — Orquestrador HFT com Hot-Swap Multi-Contas, Paridade ECN e Radar de Pendentes
 import time
 import json
 import requests
@@ -140,7 +140,6 @@ def purge_stale_pending_orders(max_age_minutes=60):
 
 
 def cancel_all_pending_orders():
-    """Cancela exclusivamente ordens pendentes sem afetar posições abertas."""
     orders = mt5.orders_get()
     if not orders: return 0
     cancelled = 0
@@ -153,7 +152,6 @@ def cancel_all_pending_orders():
 
 
 def cancel_single_pending_order(ticket):
-    """Cancela uma ordem pendente específica pelo ticket."""
     req = {"action": mt5.TRADE_ACTION_REMOVE, "order": int(ticket)}
     res = mt5.order_send(req)
     return res.retcode == mt5.TRADE_RETCODE_DONE
@@ -261,10 +259,8 @@ def manage_open_trades(engine, risk_manager, settings):
 
 
 def estimate_order_financials(symbol, order_type_int, volume, price_open, sl, tp):
-    """Calcula a estimativa em dólares exata para o SL e TP de uma ordem pendente."""
     est_sl_usd = 0.0
     est_tp_usd = 0.0
-
     action_type = mt5.ORDER_TYPE_BUY if order_type_int == mt5.ORDER_TYPE_BUY_LIMIT else mt5.ORDER_TYPE_SELL
 
     if sl > 0:
@@ -272,7 +268,6 @@ def estimate_order_financials(symbol, order_type_int, volume, price_open, sl, tp
         if val is not None:
             est_sl_usd = round(val, 2)
         else:
-            # Fallback manual por especificação do contrato
             is_gold = any(x in symbol.upper() for x in ["XAU", "GOLD"])
             mult = 100.0 if is_gold else 1.0
             dist = abs(price_open - sl)
@@ -367,7 +362,6 @@ def get_performance_stats(risk_base=50.0):
                         "profit": round(p.profit + p.swap, 2)
                     })
 
-        # TELEMETRIA DE ORDENS PENDENTES (ARMADAS)
         pending_orders = []
         orders = mt5.orders_get()
         if orders:
@@ -711,10 +705,11 @@ def main():
 
     processed_fvgs = set()
     last_hb = 0
+    last_known_login = None
     active_mode = "BOTH"
     cached_settings = {}
 
-    sync.add_log(None, "Motor conectado com Telemetria de Ordens Pendentes e Escudo Ativo.", "INFO")
+    sync.add_log(None, "Motor conectado com Suporte a Hot-Swap Multi-Contas e Telemetria de Pendentes.", "INFO")
 
     try:
         while True:
@@ -722,19 +717,28 @@ def main():
 
             acc = mt5.account_info()
             if acc:
+                current_login = str(acc.login)
                 balance, equity = acc.balance, acc.equity
                 pnl_today = equity - balance
-                login, server = str(acc.login), acc.server
-                
-                breached, msg = risk_manager.update_account_state(balance, equity, broker_time)
+                server = acc.server
+                currency = acc.currency or "USD"
+
+                # HOT-SWAP DETECTOR: Detecta troca de conta ativa no MT5
+                if current_login != last_known_login:
+                    print(f"🔄 [HOT-SWAP MT5] Troca de conta detectada: #{current_login} ({server} • {currency})")
+                    engine.symbol_cache.clear()           # Limpa cache para detectar novos sufixos (.e, .cash, etc)
+                    engine._calibrate_broker_utc_offset() # Recalibra offset de horário do novo servidor
+                    processed_fvgs.clear()                # Limpa fila para nova leitura
+                    last_known_login = current_login
+
+                # Atualiza estado de risco isolado por Login
+                breached, msg = risk_manager.update_account_state(balance, equity, broker_time, current_login)
                 if breached:
-                    sync.add_log(None, f"⛔ [PROP SHIELD] {msg} — Liquidando posições e travando operações!", "DANGER")
+                    sync.add_log(None, f"⛔ [PROP SHIELD] {msg} — Operações travadas para #{current_login}!", "DANGER")
                     cancel_all_pending_orders()
                     close_all_open_positions()
-                    time.sleep(10)
-                    continue
             else:
-                balance, equity, pnl_today, login, server = 0, 0, 0, "--", "--"
+                balance, equity, pnl_today, current_login, server, currency = 0, 0, 0, "--", "--", "USD"
 
             raw_backtest_mode = bool(cached_settings.get("raw_backtest_mode", False))
 
@@ -746,6 +750,7 @@ def main():
                     if purged > 0:
                         sync.add_log(None, f"📰 [NEWS SHIELD] {purged} ordens canceladas por anúncio: {news_title}", "WARN")
 
+            # CICLO DE TELEMETRIA E HEARTBEAT (Executa sempre para manter a Web atualizada)
             agora = time.time()
             if agora - last_hb >= 2.0:
                 last_hb = agora
@@ -793,6 +798,8 @@ def main():
 
                 perf_data = get_performance_stats(risk_base=risk_manager.risk_per_trade_usd)
                 perf_data["scout_directives"] = scout.active_directives
+                perf_data["currency"] = currency
+                perf_data["daily_lock_active"] = risk_manager.daily_lock_active
 
                 nasdaq_cfg = cached_settings.get("nasdaq") or {
                     "auto_ia": cached_settings.get("auto_profile_ia", False),
@@ -834,10 +841,11 @@ def main():
                     "raw_backtest_mode": raw_backtest_mode
                 }
 
-                sync.send_heartbeat("hibrido", pnl_today, login, balance, equity, server, perf_data)
+                sync.send_heartbeat("hibrido", pnl_today, current_login, balance, equity, server, perf_data)
 
             manage_open_trades(engine, risk_manager, cached_settings)
 
+            # Se a conta atual estiver em trava de drawdown ou notícia, aguarda sem travar telemetria
             if is_news or risk_manager.daily_lock_active:
                 time.sleep(1)
                 continue

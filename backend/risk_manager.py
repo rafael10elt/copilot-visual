@@ -1,4 +1,4 @@
-# risk_manager.py — Gestão de Risco com Paridade Institucional NASDAQ vs XAUUSD, FTMO Shield, BE 1.2R e Trailing 1.5R
+# risk_manager.py — Gestão de Risco com Isolamento Multi-Contas (Hot-Swap), Proteção Cents/USD e FTMO Shield
 import MetaTrader5 as mt5
 import pandas as pd
 import math
@@ -7,69 +7,103 @@ import os
 from datetime import datetime
 
 class RiskManager:
-    def __init__(self, risk_per_trade_usd=100.0, max_daily_loss_usd=400.0, state_file="risk_state.json"):
+    def __init__(self, risk_per_trade_usd=50.0, max_daily_loss_usd=400.0, state_file="risk_state.json"):
         self.risk_per_trade_usd = risk_per_trade_usd
         self.max_daily_loss_usd = max_daily_loss_usd
         self.state_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), state_file)
         
-        self.start_day_balance = None
-        self.peak_day_equity = None
-        self.daily_lock_active = False
-        self.current_broker_day_str = None
+        # Dicionário de contas isoladas por Login
+        self.accounts_state = {}
+        self.current_login = None
 
         self._load_state()
 
     def _load_state(self):
+        """Carrega estados de múltiplas contas do arquivo JSON."""
         if os.path.exists(self.state_file):
             try:
                 with open(self.state_file, "r") as f:
                     data = json.load(f)
-                    self.current_broker_day_str = data.get("date")
-                    self.start_day_balance = float(data.get("start_balance", 0.0))
-                    self.peak_day_equity = float(data.get("peak_equity", self.start_day_balance))
-                    self.daily_lock_active = bool(data.get("daily_lock_active", False))
-                    print(f"📁 [RISK SHIELD] Estado restaurado: Data={self.current_broker_day_str} | Base=${self.start_day_balance:.2f} | Lock={self.daily_lock_active}")
+                    # Compatibilidade com versão antiga (converte formato plano em multi-conta)
+                    if "accounts" in data:
+                        self.accounts_state = data.get("accounts", {})
+                    else:
+                        # Migração automática
+                        old_date = data.get("date")
+                        old_base = float(data.get("start_balance", 0.0))
+                        old_peak = float(data.get("peak_equity", old_base))
+                        old_lock = bool(data.get("daily_lock_active", False))
+                        self.accounts_state = {
+                            "legacy": {
+                                "date": old_date,
+                                "start_balance": old_base,
+                                "peak_equity": old_peak,
+                                "daily_lock_active": old_lock
+                            }
+                        }
             except Exception as e:
                 print(f"⚠️ [RISK SHIELD] Falha ao ler {self.state_file}: {e}")
 
     def _save_state(self):
+        """Persiste os estados de todas as contas em disco."""
         try:
             payload = {
-                "date": self.current_broker_day_str,
-                "start_balance": self.start_day_balance,
-                "peak_equity": self.peak_day_equity,
-                "daily_lock_active": self.daily_lock_active
+                "accounts": self.accounts_state
             }
             with open(self.state_file, "w") as f:
                 json.dump(payload, f, indent=2)
         except Exception as e:
             print(f"⚠️ [RISK SHIELD] Falha ao persistir estado: {e}")
 
-    def update_account_state(self, current_balance, current_equity, broker_server_time=None):
+    @property
+    def daily_lock_active(self):
+        """Retorna o status de trava da conta atualmente conectada."""
+        if not self.current_login:
+            return False
+        return self.accounts_state.get(str(self.current_login), {}).get("daily_lock_active", False)
+
+    def update_account_state(self, current_balance, current_equity, broker_server_time=None, account_login=None):
+        """
+        Monitora e isola a perda diária para a conta ativa específica.
+        Se trocar de conta no MT5, troca o benchmark instantaneamente sem disparar falso drawdown.
+        """
         now = broker_server_time or datetime.now()
         today_str = now.strftime('%Y-%m-%d')
+        login_key = str(account_login or "default")
 
-        if self.current_broker_day_str != today_str:
-            self.current_broker_day_str = today_str
-            self.start_day_balance = max(current_balance, current_equity)
-            self.peak_day_equity = current_equity
-            self.daily_lock_active = False
+        # Detecta transição de conta (Hot-Swap)
+        if self.current_login != login_key:
+            self.current_login = login_key
+            print(f"🔄 [RISK HOT-SWAP] Monitorando conta: #{login_key} (Saldo Atual: {current_balance:.2f})")
+
+        acc_data = self.accounts_state.get(login_key)
+
+        # Se for um novo dia ou a conta for nova
+        if not acc_data or acc_data.get("date") != today_str:
+            self.accounts_state[login_key] = {
+                "date": today_str,
+                "start_balance": max(current_balance, current_equity),
+                "peak_equity": current_equity,
+                "daily_lock_active": False
+            }
             self._save_state()
-            print(f"🔄 [PROP FIRM SHIELD] Novo dia no servidor ({today_str}). Benchmark: ${self.start_day_balance:.2f}")
+            print(f"✨ [RISK BENCHMARK] Conta #{login_key}: Novo benchmark diário estabelecido em ${current_balance:.2f}")
+            acc_data = self.accounts_state[login_key]
 
-        if self.start_day_balance is None:
-            self.start_day_balance = max(current_balance, current_equity)
+        start_bal = acc_data.get("start_balance", current_balance)
+        peak_eq = acc_data.get("peak_equity", current_equity)
+
+        # Atualiza topo de equity da conta
+        if current_equity > peak_eq:
+            acc_data["peak_equity"] = current_equity
             self._save_state()
 
-        if current_equity > (self.peak_day_equity or 0.0):
-            self.peak_day_equity = current_equity
-            self._save_state()
-
-        drawdown_from_start = self.start_day_balance - current_equity
+        # Calcula Drawdown exclusivamente em relação ao início desta conta
+        drawdown_from_start = start_bal - current_equity
         soft_stop_limit = self.max_daily_loss_usd * 0.85
 
         if drawdown_from_start >= soft_stop_limit:
-            self.daily_lock_active = True
+            acc_data["daily_lock_active"] = True
             self._save_state()
             return True, f"DRAWDOWN_LIMIT_GUARD: Perda acumulada de ${drawdown_from_start:.2f} (Soft Stop: ${soft_stop_limit:.2f} / Teto: ${self.max_daily_loss_usd:.2f})"
         
@@ -90,18 +124,13 @@ class RiskManager:
         return round(float(atr), 2)
 
     def get_trade_parameters(self, profile, fvg, atr, symbol, direction, use_ce_50=True):
-        """
-        Calcula parâmetros de execução com separação de regimes de volatilidade para NASDAQ e OURO.
-        """
         is_nasdaq = any(x in symbol.upper() for x in ["US100", "NAS", "USTEC", "NQ"])
 
         if is_nasdaq:
-            # NASDAQ (Pontos de Índice): Folgas maiores para oscilações de 15 a 40 pts
             buffer = 3.50               
             min_stop_points = 12.00     
             max_allowed_risk = 35.00    
         else:
-            # XAUUSD (Dólares por Onça): Buffer para absorver spread ($0.30) e micropavios
             buffer = 0.90               
             min_stop_points = 2.50      
             max_allowed_risk = 5.00     
@@ -120,7 +149,7 @@ class RiskManager:
             else: tp_price = entry_price + (risk * 1.5)
             sl_price = entry_price - risk
 
-        else: # SELL
+        else:
             entry_price = ce_price if use_ce_50 else fvg_bottom
             raw_risk = (fvg_top - entry_price) + buffer
             risk = min(max(raw_risk, min_stop_points), max_allowed_risk)
