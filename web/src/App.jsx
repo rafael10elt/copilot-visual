@@ -15,7 +15,6 @@ export default function App() {
   const [tab, setTab] = useState('dashboard');
   const [status, setStatus] = useState({ is_online: false, pnl_today: 0, current_profile: 'tatico' });
   
-  // Inicialização resiliente com cache local
   const [settings, setSettings] = useState(() => {
     try {
       const cached = localStorage.getItem(LOCAL_STORAGE_KEY);
@@ -36,7 +35,6 @@ export default function App() {
   const lastSeenBacktestTimestampRef = useRef(null);
 
   useEffect(() => {
-    // 1. Carrega Status
     supabase.from('copilot_status').select('*').eq('id', 1).single()
       .then(r => {
         if (r.data) {
@@ -48,7 +46,6 @@ export default function App() {
         }
       });
 
-    // 2. Carrega Configurações com fallback e mesclagem
     supabase.from('copilot_settings').select('*').eq('id', 1).single()
       .then(r => {
         if (r.data) {
@@ -60,11 +57,9 @@ export default function App() {
         }
       });
 
-    // 3. Carrega Logs
     supabase.from('copilot_logs').select('*').order('created_at', { ascending: false }).limit(40)
       .then(r => r.data && setLogs(r.data));
 
-    // 4. Canal em Tempo Real
     const channel = supabase.channel('copilot_realtime_sync')
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'copilot_status' }, p => {
         setStatus(p.new);
@@ -112,7 +107,6 @@ export default function App() {
     return () => supabase.removeChannel(channel);
   }, [soundEnabled]);
 
-  // Atualização garantida e atômica
   const handleUpdateSettings = async (newFields) => {
     setSettings(prev => {
       const updated = { ...prev, ...newFields };
@@ -123,13 +117,16 @@ export default function App() {
     });
 
     try {
-      const { error } = await supabase.from('copilot_settings').update(newFields).eq('id', 1);
-      if (error) {
-        console.warn("⚠️ Aviso ao persistir no Supabase:", error.message);
-      }
+      await supabase.from('copilot_settings').update(newFields).eq('id', 1);
     } catch (err) {
-      console.error("Falha de rede ao salvar configurações:", err);
+      console.error("Falha ao salvar configurações:", err);
     }
+  };
+
+  // Cancelamento seletivo de ordens pendentes
+  const handleCancelPendingOrders = async (ticket = null) => {
+    const cmd = ticket ? `CANCEL_ORDER:${ticket}` : "CANCEL_ALL_PENDING";
+    await supabase.from('copilot_settings').update({ command: cmd }).eq('id', 1);
   };
 
   const handleEmergencyStop = async () => {
@@ -227,6 +224,7 @@ export default function App() {
             status={status}
             settings={settings}
             onEmergencyStop={handleEmergencyStop}
+            onCancelPendingOrders={handleCancelPendingOrders}
             onRunBacktest={handleRunBacktest}
             onUpdateSettings={handleUpdateSettings}
             latestBacktest={latestBacktest}

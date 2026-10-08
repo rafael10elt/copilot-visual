@@ -1,4 +1,4 @@
-# main.py — Orquestrador HFT com Modo Fiel ao Backtest, Paridade 1:1 NASDAQ/XAUUSD e Execução ECN
+# main.py — Orquestrador HFT com Telemetria de Ordens Pendentes ($ TP/$ SL), Cancelamento Seletivo e Paridade 1:1
 import time
 import json
 import requests
@@ -140,6 +140,7 @@ def purge_stale_pending_orders(max_age_minutes=60):
 
 
 def cancel_all_pending_orders():
+    """Cancela exclusivamente ordens pendentes sem afetar posições abertas."""
     orders = mt5.orders_get()
     if not orders: return 0
     cancelled = 0
@@ -149,6 +150,13 @@ def cancel_all_pending_orders():
             res = mt5.order_send(req)
             if res.retcode == mt5.TRADE_RETCODE_DONE: cancelled += 1
     return cancelled
+
+
+def cancel_single_pending_order(ticket):
+    """Cancela uma ordem pendente específica pelo ticket."""
+    req = {"action": mt5.TRADE_ACTION_REMOVE, "order": int(ticket)}
+    res = mt5.order_send(req)
+    return res.retcode == mt5.TRADE_RETCODE_DONE
 
 
 def close_all_open_positions():
@@ -252,9 +260,41 @@ def manage_open_trades(engine, risk_manager, settings):
                     print(f"🛡️ [BREAK-EVEN 1.2R] #{p.ticket} ({p.symbol}) SL protegido em {new_be_sl}")
 
 
+def estimate_order_financials(symbol, order_type_int, volume, price_open, sl, tp):
+    """Calcula a estimativa em dólares exata para o SL e TP de uma ordem pendente."""
+    est_sl_usd = 0.0
+    est_tp_usd = 0.0
+
+    action_type = mt5.ORDER_TYPE_BUY if order_type_int == mt5.ORDER_TYPE_BUY_LIMIT else mt5.ORDER_TYPE_SELL
+
+    if sl > 0:
+        val = mt5.order_calc_profit(action_type, symbol, volume, price_open, sl)
+        if val is not None:
+            est_sl_usd = round(val, 2)
+        else:
+            # Fallback manual por especificação do contrato
+            is_gold = any(x in symbol.upper() for x in ["XAU", "GOLD"])
+            mult = 100.0 if is_gold else 1.0
+            dist = abs(price_open - sl)
+            est_sl_usd = -round(dist * volume * mult, 2)
+
+    if tp > 0:
+        val = mt5.order_calc_profit(action_type, symbol, volume, price_open, tp)
+        if val is not None:
+            est_tp_usd = round(val, 2)
+        else:
+            is_gold = any(x in symbol.upper() for x in ["XAU", "GOLD"])
+            mult = 100.0 if is_gold else 1.0
+            dist = abs(tp - price_open)
+            est_tp_usd = round(dist * volume * mult, 2)
+
+    return est_sl_usd, est_tp_usd
+
+
 def get_performance_stats(risk_base=50.0):
     try:
         now = datetime.now()
+        now_ts = now.timestamp()
         start_of_today = datetime(now.year, now.month, now.day, 0, 0, 0)
         end_of_today = start_of_today + timedelta(days=2)
         start_30d = start_of_today - timedelta(days=30)
@@ -327,6 +367,37 @@ def get_performance_stats(risk_base=50.0):
                         "profit": round(p.profit + p.swap, 2)
                     })
 
+        # TELEMETRIA DE ORDENS PENDENTES (ARMADAS)
+        pending_orders = []
+        orders = mt5.orders_get()
+        if orders:
+            for o in orders:
+                if o.magic == ROBOT_MAGIC:
+                    order_type_str = "BUY LIMIT" if o.type == mt5.ORDER_TYPE_BUY_LIMIT else ("SELL LIMIT" if o.type == mt5.ORDER_TYPE_SELL_LIMIT else "PENDING")
+                    tick = mt5.symbol_info_tick(o.symbol)
+                    
+                    curr_price = tick.ask if "BUY" in order_type_str else tick.bid if tick else o.price_open
+                    dist = abs(curr_price - o.price_open) if tick else 0.0
+                    age_m = max(0, int((now_ts - o.time_setup) / 60))
+
+                    est_sl, est_tp = estimate_order_financials(o.symbol, o.type, o.volume_current, o.price_open, o.sl, o.tp)
+
+                    pending_orders.append({
+                        "ticket": o.ticket,
+                        "symbol": o.symbol,
+                        "type": order_type_str,
+                        "volume": o.volume_current,
+                        "price_target": round(o.price_open, 2),
+                        "price_current": round(curr_price, 2),
+                        "distance": round(dist, 2),
+                        "sl": round(o.sl, 2),
+                        "tp": round(o.tp, 2),
+                        "est_sl_usd": est_sl,
+                        "est_tp_usd": est_tp,
+                        "age_minutes": age_m,
+                        "time_setup": datetime.fromtimestamp(o.time_setup).strftime("%H:%M:%S")
+                    })
+
         today_total = today_wins + today_losses
         today_win_rate = int((today_wins / today_total) * 100) if today_total > 0 else 0
         today_net_r = round(today_realized_pnl / max(risk_base, 1.0), 2)
@@ -345,6 +416,8 @@ def get_performance_stats(risk_base=50.0):
             "net_r": today_net_r,
             "open_count": len(open_positions),
             "open_positions": open_positions,
+            "pending_count": len(pending_orders),
+            "pending_orders": pending_orders,
             "closed_trades": today_deals_closed[-8:],
             "stats_30d": {
                 "total_trades": total_30d,
@@ -361,7 +434,8 @@ def get_performance_stats(risk_base=50.0):
         print(f"⚠️ Erro ao calcular estatísticas: {e}")
         return {
             "total_trades": 0, "wins": 0, "losses": 0, "win_rate": 0,
-            "realized_pnl": 0.0, "net_r": 0.0, "open_count": 0, "open_positions": [], "closed_trades": [],
+            "realized_pnl": 0.0, "net_r": 0.0, "open_count": 0, "open_positions": [],
+            "pending_count": 0, "pending_orders": [], "closed_trades": [],
             "stats_30d": {
                 "total_trades": 0, "wins": 0, "losses": 0, "win_rate": 0,
                 "realized_pnl": 0.0, "net_r": 0.0, "max_drawdown_usd": 0.0, "profit_factor": 0.0
@@ -370,10 +444,6 @@ def get_performance_stats(risk_base=50.0):
 
 
 def run_recent_backtest(engine, symbol, days=0, risk_per_trade=50.0, session_mode="KILLZONES"):
-    """
-    Sandbox com PARIDADE 1:1 REALISTA com a execução do MT5.
-    Exige que o Bid fure o spread para que o Ask atinja a ordem limite de compra.
-    """
     if not symbol: return None
 
     broker_now = engine.get_broker_current_time(symbol)
@@ -395,7 +465,6 @@ def run_recent_backtest(engine, symbol, days=0, risk_per_trade=50.0, session_mod
 
     is_nasdaq = any(x in symbol.upper() for x in ["US100", "NAS", "USTEC", "NQ"])
     
-    # PARIDADE COM O RISK_MANAGER:
     if is_nasdaq:
         buffer_pts = 3.50
         min_stop_points = 12.00
@@ -493,9 +562,6 @@ def run_recent_backtest(engine, symbol, days=0, risk_per_trade=50.0, session_mod
                         win, loss, hit_be = False, False, False
                         trade_resolved_idx = start_idx
 
-                        # PREENCHIMENTO REALISTA COM SPREAD:
-                        # Buy Limit só executa se a mínima da vela M1 for menor que (raw_entry - spread_pts)
-                        # Sell Limit executa no toque direto da máxima
                         for step, (h, l) in enumerate(zip(sim_slice_h, sim_slice_l)):
                             current_m1_idx = start_idx + step
 
@@ -648,7 +714,7 @@ def main():
     active_mode = "BOTH"
     cached_settings = {}
 
-    sync.add_log(None, "Motor conectado com Escudo Ativo e Paridade 1:1 NASDAQ/XAUUSD.", "INFO")
+    sync.add_log(None, "Motor conectado com Telemetria de Ordens Pendentes e Escudo Ativo.", "INFO")
 
     try:
         while True:
@@ -709,6 +775,16 @@ def main():
                                 try: sync.client.table("copilot_status").update({"last_backtest": rep}).eq("id", 1).execute()
                                 except: pass
                                 sync.add_log(real_sym, f"BACKTEST_RESULT:{json.dumps(rep)}", "SUCCESS")
+
+                        elif cmd == "CANCEL_ALL_PENDING":
+                            c = cancel_all_pending_orders()
+                            sync.add_log(None, f"🧹 Limpeza: {c} ordens pendentes canceladas pelo painel.", "WARN")
+
+                        elif cmd.startswith("CANCEL_ORDER:"):
+                            ticket_to_cancel = int(cmd.split(":")[1])
+                            ok = cancel_single_pending_order(ticket_to_cancel)
+                            if ok:
+                                sync.add_log(None, f"🧹 Ordem pendente #{ticket_to_cancel} cancelada individualmente.", "WARN")
 
                         elif "EMERGENCY_STOP" in cmd:
                             c = cancel_all_pending_orders()

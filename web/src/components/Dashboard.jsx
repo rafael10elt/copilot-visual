@@ -2,13 +2,14 @@ import React, { useState } from 'react';
 import { 
   UserCheck, Power, Sparkles, BarChart3, AlertTriangle, X, 
   CheckCircle2, Trophy, ArrowRight, Loader2, Activity, Clock, 
-  Radar, Cpu, Sliders, ShieldCheck, Zap, Crosshair, TableProperties, Target
+  Radar, Cpu, Sliders, ShieldCheck, Zap, Crosshair, TableProperties, Target, Trash2
 } from 'lucide-react';
 
 export default function Dashboard({ 
   status, 
   settings, 
-  onEmergencyStop, 
+  onEmergencyStop,
+  onCancelPendingOrders,
   onRunBacktest, 
   onUpdateSettings,
   latestBacktest,
@@ -37,6 +38,8 @@ export default function Dashboard({
     net_r: 0,
     open_count: 0,
     open_positions: [],
+    pending_count: 0,
+    pending_orders: [],
     closed_trades: [],
     stats_30d: {
       total_trades: 0,
@@ -64,7 +67,6 @@ export default function Dashboard({
   const progressPct = Math.min(100, Math.max(0, (stats30d.realized_pnl / Math.max(propTarget, 1)) * 100));
   const scoutDirectives = stats?.scout_directives || null;
 
-  // Lógica reativa: reflete IMEDIATAMENTE as escolhas do usuário salvas em settings
   const nasdaqSessionUi = settings?.nasdaq?.session_mode || stats?.active_strategy?.nasdaq?.session_mode || 'KILLZONES';
   const goldSessionUi = settings?.gold?.session_mode || stats?.active_strategy?.gold?.session_mode || '24H';
 
@@ -227,7 +229,7 @@ export default function Dashboard({
             </div>
           </div>
 
-          {/* 3. MODO OPERACIONAL (REFLETINDO INSTANTANEAMENTE AS CONFIGURAÇÕES) */}
+          {/* 3. MODO OPERACIONAL */}
           <div className="bg-zinc-900/90 border border-zinc-800 p-4 rounded-2xl shadow-xl space-y-3">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
@@ -318,7 +320,7 @@ export default function Dashboard({
             </div>
           </div>
 
-          {/* 4. CONTADORES DO DIA */}
+          {/* 4. CONTADORES REAIS DO DIA */}
           <div className="bg-zinc-900/90 border border-zinc-800 p-4 rounded-2xl shadow-xl space-y-3">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
@@ -360,8 +362,76 @@ export default function Dashboard({
               </div>
             </div>
 
-            {/* Posições Ativas */}
-            <div>
+            {/* RADAR DE ORDENS PENDENTES (ARMADAS) COM $ TP / $ SL */}
+            <div className="pt-2 border-t border-zinc-800/70">
+              <div className="flex items-center justify-between mb-2">
+                <div className="flex items-center gap-2">
+                  <Crosshair size={14} className={stats.pending_count > 0 ? "text-amber-400 animate-pulse" : "text-zinc-500"} />
+                  <span className="text-[10px] font-mono text-zinc-300 uppercase tracking-wider font-bold">
+                    Armas Apontadas / Pending Orders ({stats.pending_count || 0})
+                  </span>
+                </div>
+                {stats.pending_count > 0 && (
+                  <button
+                    onClick={() => onCancelPendingOrders(null)}
+                    title="Cancela apenas as ordens pendentes sem afetar posições abertas"
+                    className="flex items-center gap-1 px-2 py-0.5 rounded bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/30 text-[9px] font-mono font-bold transition-all">
+                    <Trash2 size={10} /> Limpar Todas
+                  </button>
+                )}
+              </div>
+
+              {stats.pending_orders && stats.pending_orders.length > 0 ? (
+                <div className="space-y-2">
+                  {stats.pending_orders.map((ord) => (
+                    <div key={ord.ticket} className="bg-zinc-950 border border-amber-500/30 p-2.5 rounded-xl text-[11px] font-mono space-y-1.5 shadow-md">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <span className={`px-1.5 py-0.2 rounded text-[9px] font-bold ${ord.type.includes('BUY') ? 'bg-emerald-500/20 text-emerald-300' : 'bg-rose-500/20 text-rose-300'}`}>
+                            {ord.type}
+                          </span>
+                          <strong className="text-zinc-100">{ord.symbol}</strong>
+                          <span className="text-zinc-400">({ord.volume} lots)</span>
+                          <span className="text-[9px] text-zinc-500">#{ord.ticket}</span>
+                        </div>
+                        <button
+                          onClick={() => onCancelPendingOrders(ord.ticket)}
+                          className="px-1.5 py-0.5 rounded bg-zinc-800 hover:bg-rose-900/40 text-zinc-400 hover:text-rose-300 border border-zinc-700 text-[9px] font-bold transition-colors">
+                          Cancelar
+                        </button>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-2 bg-zinc-900/60 p-1.5 rounded-lg border border-zinc-800/60 text-[10px]">
+                        <div>
+                          <span className="text-zinc-500 block">Entrada Limite:</span>
+                          <strong className="text-zinc-200">@{ord.price_target}</strong>
+                          <span className="text-[9px] text-amber-400 block mt-0.5">
+                            Falta: {ord.distance} pts (Atual: {ord.price_current})
+                          </span>
+                        </div>
+                        <div className="text-right">
+                          <span className="text-zinc-500 block">Projeção do Trade:</span>
+                          <span className="text-rose-400 font-bold block">{ord.est_sl_usd ? `-$${Math.abs(ord.est_sl_usd)} SL` : 'SL: --'}</span>
+                          <span className="text-emerald-400 font-bold block">{ord.est_tp_usd ? `+$${ord.est_tp_usd} TP` : 'TP: --'}</span>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center justify-between text-[9px] text-zinc-500 pt-0.5">
+                        <span>Armada às: {ord.time_setup}</span>
+                        <span>Tempo viva: {ord.age_minutes}m</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="p-2.5 bg-zinc-950/60 border border-zinc-800/60 rounded-xl text-center text-[10px] font-mono text-zinc-500">
+                  Nenhuma ordem pendente no momento. Monitorando formação de FVG...
+                </div>
+              )}
+            </div>
+
+            {/* POSIÇÕES ATIVAS */}
+            <div className="pt-2 border-t border-zinc-800/70">
               <span className="text-[10px] font-mono text-zinc-400 uppercase tracking-wider block mb-1.5">
                 Active Positions ({stats.open_count})
               </span>
