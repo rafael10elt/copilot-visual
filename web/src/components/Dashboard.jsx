@@ -64,24 +64,32 @@ export default function Dashboard({
   const progressPct = Math.min(100, Math.max(0, (stats30d.realized_pnl / Math.max(propTarget, 1)) * 100));
   const scoutDirectives = stats?.scout_directives || null;
 
-  const activeStrategy = stats?.active_strategy || {
+  // Lógica reativa: reflete IMEDIATAMENTE as escolhas do usuário salvas em settings
+  const nasdaqSessionUi = settings?.nasdaq?.session_mode || stats?.active_strategy?.nasdaq?.session_mode || 'KILLZONES';
+  const goldSessionUi = settings?.gold?.session_mode || stats?.active_strategy?.gold?.session_mode || '24H';
+
+  const isRawModeActive = typeof settings?.raw_backtest_mode !== 'undefined'
+    ? !!settings.raw_backtest_mode
+    : !!stats?.active_strategy?.raw_backtest_mode;
+
+  const activeStrategy = {
     nasdaq: {
-      is_auto: false,
-      profile: settings?.nasdaq?.profile || settings?.profile || 'guardiao',
-      entry_type: '50% CE',
-      session_mode: 'KILLZONES',
-      status: 'AUTORIZADO'
+      is_auto: settings?.nasdaq?.auto_ia ?? stats?.active_strategy?.nasdaq?.is_auto ?? false,
+      profile: settings?.nasdaq?.profile || stats?.active_strategy?.nasdaq?.profile || 'guardiao',
+      entry_type: (settings?.nasdaq?.use_ce_50 !== false) ? '50% CE' : 'Borda',
+      session_mode: nasdaqSessionUi,
+      status: stats?.active_strategy?.nasdaq?.status || 'STAND-BY'
     },
     gold: {
-      is_auto: false,
-      profile: settings?.gold?.profile || settings?.profile || 'tatico',
-      entry_type: '50% CE',
-      session_mode: '24H',
-      status: 'AUTORIZADO'
+      is_auto: settings?.gold?.auto_ia ?? stats?.active_strategy?.gold?.is_auto ?? false,
+      profile: settings?.gold?.profile || stats?.active_strategy?.gold?.profile || 'tatico',
+      entry_type: (settings?.gold?.use_ce_50 !== false) ? '50% CE' : 'Borda',
+      session_mode: goldSessionUi,
+      status: stats?.active_strategy?.gold?.status || 'AUTORIZADO'
     },
-    breakeven: settings?.breakeven_enabled !== false ? "ATIVO (1.2R)" : "DESLIGADO",
+    breakeven: (settings?.breakeven_enabled !== false) ? "ATIVO (1.2R)" : "DESLIGADO",
     trailing: settings?.trailing_enabled ? "ATIVO (M1)" : "DESLIGADO",
-    raw_backtest_mode: !!settings?.raw_backtest_mode
+    raw_backtest_mode: isRawModeActive
   };
 
   const handleBacktestClick = () => {
@@ -133,7 +141,7 @@ export default function Dashboard({
       <div className="space-y-4 lg:space-y-0 lg:grid lg:grid-cols-12 lg:gap-4 xl:gap-5">
         
         {/* ============================================================== */}
-        {/* COLUNA ESQUERDA (DADOS & ESTRATÉGIAS) — 7 Colunas */}
+        {/* COLUNA ESQUERDA — 7 Colunas */}
         {/* ============================================================== */}
         <div className="space-y-4 lg:col-span-7 xl:col-span-7">
           
@@ -219,7 +227,7 @@ export default function Dashboard({
             </div>
           </div>
 
-          {/* 3. MODO OPERACIONAL COM VISÃO INDEPENDENTE POR ATIVO */}
+          {/* 3. MODO OPERACIONAL (REFLETINDO INSTANTANEAMENTE AS CONFIGURAÇÕES) */}
           <div className="bg-zinc-900/90 border border-zinc-800 p-4 rounded-2xl shadow-xl space-y-3">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
@@ -242,8 +250,12 @@ export default function Dashboard({
               <div className="bg-zinc-950 p-3.5 rounded-xl border border-zinc-800/80 space-y-2">
                 <div className="flex items-center justify-between border-b border-zinc-800/60 pb-1.5">
                   <strong className="text-xs text-zinc-200 font-mono">NASDAQ (US100)</strong>
-                  <span className="text-[8px] font-mono font-bold px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-300 border border-zinc-700">
-                    {activeStrategy.nasdaq.session_mode || 'KILLZONES'}
+                  <span className={`text-[9px] font-mono font-bold px-2 py-0.5 rounded border ${
+                    activeStrategy.nasdaq.session_mode === '24H'
+                      ? 'bg-amber-500/10 text-amber-300 border-amber-500/40'
+                      : 'bg-emerald-500/10 text-emerald-300 border-emerald-500/40'
+                  }`}>
+                    {activeStrategy.nasdaq.session_mode}
                   </span>
                 </div>
                 
@@ -273,8 +285,12 @@ export default function Dashboard({
               <div className="bg-zinc-950 p-3.5 rounded-xl border border-zinc-800/80 space-y-2">
                 <div className="flex items-center justify-between border-b border-zinc-800/60 pb-1.5">
                   <strong className="text-xs text-zinc-200 font-mono">XAUUSD (GOLD)</strong>
-                  <span className="text-[8px] font-mono font-bold px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-300 border border-zinc-700">
-                    {activeStrategy.gold.session_mode || '24H'}
+                  <span className={`text-[9px] font-mono font-bold px-2 py-0.5 rounded border ${
+                    activeStrategy.gold.session_mode === '24H'
+                      ? 'bg-amber-500/10 text-amber-300 border-amber-500/40'
+                      : 'bg-emerald-500/10 text-emerald-300 border-emerald-500/40'
+                  }`}>
+                    {activeStrategy.gold.session_mode}
                   </span>
                 </div>
 
@@ -302,7 +318,7 @@ export default function Dashboard({
             </div>
           </div>
 
-          {/* 4. CONTADORES REAIS DO DIA */}
+          {/* 4. CONTADORES DO DIA */}
           <div className="bg-zinc-900/90 border border-zinc-800 p-4 rounded-2xl shadow-xl space-y-3">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
@@ -378,7 +394,7 @@ export default function Dashboard({
         </div>
 
         {/* ============================================================== */}
-        {/* COLUNA DIREITA (RADAR, BACKTEST & CONTROLES) — 5 Colunas */}
+        {/* COLUNA DIREITA — 5 Colunas */}
         {/* ============================================================== */}
         <div className="space-y-4 lg:col-span-5 xl:col-span-5">
           
@@ -476,7 +492,6 @@ export default function Dashboard({
               )}
             </div>
 
-            {/* Ativo */}
             <div>
               <span className="text-[10px] font-mono text-zinc-400 block mb-1.5 uppercase">Ativo</span>
               <div className="grid grid-cols-2 gap-2">
@@ -501,7 +516,6 @@ export default function Dashboard({
               </div>
             </div>
 
-            {/* Sessão */}
             <div>
               <span className="text-[10px] font-mono text-zinc-400 block mb-1.5 uppercase">Filtro de Sessão</span>
               <div className="grid grid-cols-2 gap-2">
@@ -526,7 +540,6 @@ export default function Dashboard({
               </div>
             </div>
 
-            {/* Janela de Teste */}
             <div>
               <span className="text-[10px] font-mono text-zinc-400 block mb-1.5 uppercase">Janela de Teste</span>
               <div className="grid grid-cols-5 gap-1.5">

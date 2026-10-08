@@ -23,30 +23,32 @@ export default function ControlPanel({ settings, onUpdateSettings }) {
     session_mode: '24H'
   };
 
+  const currentCfg = selectedAssetTab === 'nasdaq' ? nasdaqCfg : goldCfg;
+
   const handleUpdateAssetField = (assetKey, field, value) => {
-    const currentAssetConfig = assetKey === 'nasdaq' ? nasdaqCfg : goldCfg;
-    const updated = {
-      ...currentAssetConfig,
+    const baseConfig = assetKey === 'nasdaq' ? nasdaqCfg : goldCfg;
+    const updatedAsset = {
+      ...baseConfig,
       [field]: value
     };
-    onUpdateSettings({ [assetKey]: updated });
+
+    // Dispara a atualização imediata no estado central
+    onUpdateSettings({ [assetKey]: updatedAsset });
   };
 
   const handleToggleGlobal = (field) => {
     onUpdateSettings({ [field]: !settings?.[field] });
   };
 
-  const currentCfg = selectedAssetTab === 'nasdaq' ? nasdaqCfg : goldCfg;
-
   return (
     <div className="space-y-4 lg:space-y-0 lg:grid lg:grid-cols-12 lg:gap-4 xl:gap-5">
       
       {/* ============================================================== */}
-      {/* COLUNA ESQUERDA (LIMITES & REGRAS GLOBAIS) — 5 Colunas */}
+      {/* COLUNA ESQUERDA — 5 Colunas */}
       {/* ============================================================== */}
       <div className="space-y-4 lg:col-span-5">
 
-        {/* 0. SELETOR MASTER: FIEL AO BACKTEST VS BLINDAGEM MESA */}
+        {/* 0. SELETOR MASTER */}
         <div className={`p-4 rounded-2xl border transition-all shadow-xl ${
           isRawMode 
             ? 'bg-amber-950/20 border-amber-500/40 text-amber-200' 
@@ -155,7 +157,7 @@ export default function ControlPanel({ settings, onUpdateSettings }) {
           </div>
         </div>
 
-        {/* 4. EXECUTION GUARDS (GLOBAIS) */}
+        {/* 4. EXECUTION GUARDS */}
         <div className="bg-zinc-900/90 border border-zinc-800 rounded-2xl p-4 space-y-3">
           <label className="text-[11px] font-mono uppercase tracking-wider text-zinc-400 block mb-1">
             4. Execution Guards (Proteções de Capital)
@@ -190,7 +192,7 @@ export default function ControlPanel({ settings, onUpdateSettings }) {
       </div>
 
       {/* ============================================================== */}
-      {/* COLUNA DIREITA (MOTOR HÍBRIDO POR ATIVO) — 7 Colunas */}
+      {/* COLUNA DIREITA — 7 Colunas */}
       {/* ============================================================== */}
       <div className="space-y-4 lg:col-span-7">
         
@@ -229,7 +231,7 @@ export default function ControlPanel({ settings, onUpdateSettings }) {
             </button>
           </div>
 
-          {/* SESSÃO DESTE ATIVO ESPECÍFICO */}
+          {/* SESSÃO DO ATIVO */}
           <div className="bg-zinc-950 p-3.5 rounded-xl border border-zinc-800 space-y-2">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
@@ -246,7 +248,7 @@ export default function ControlPanel({ settings, onUpdateSettings }) {
                 onClick={() => handleUpdateAssetField(selectedAssetTab, 'session_mode', 'KILLZONES')}
                 className={`py-2 rounded-xl text-[11px] font-mono font-bold border transition-all ${
                   (currentCfg.session_mode || 'KILLZONES') === 'KILLZONES'
-                    ? 'bg-emerald-500/10 border-emerald-500/40 text-emerald-300'
+                    ? 'bg-emerald-500/10 border-emerald-500/40 text-emerald-300 shadow-sm'
                     : 'bg-zinc-900 border-zinc-800 text-zinc-500 hover:text-zinc-300'
                 }`}>
                 KILLZONES (Londres/NY)
@@ -255,7 +257,7 @@ export default function ControlPanel({ settings, onUpdateSettings }) {
                 onClick={() => handleUpdateAssetField(selectedAssetTab, 'session_mode', '24H')}
                 className={`py-2 rounded-xl text-[11px] font-mono font-bold border transition-all ${
                   currentCfg.session_mode === '24H'
-                    ? 'bg-amber-500/10 border-amber-500/40 text-amber-300'
+                    ? 'bg-amber-500/10 border-amber-500/40 text-amber-300 shadow-sm'
                     : 'bg-zinc-900 border-zinc-800 text-zinc-500 hover:text-zinc-300'
                 }`}>
                 24 HORAS (Sem Filtro)

@@ -9,10 +9,22 @@ const SUPABASE_URL = "https://wvyllpbqtahxrqsjjzgp.supabase.co";
 const SUPABASE_ANON = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Ind2eWxscGJxdGFoeHJxc2pqemdwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTEyMzU3NzEsImV4cCI6MjEwNjgxMTc3MX0.7qIsu2oZermD9uPA8ggSfNZuKDZH-_ifs2jJjeTX6XM";
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON);
 
+const LOCAL_STORAGE_KEY = 'lumi_copilot_settings_cache';
+
 export default function App() {
   const [tab, setTab] = useState('dashboard');
   const [status, setStatus] = useState({ is_online: false, pnl_today: 0, current_profile: 'tatico' });
-  const [settings, setSettings] = useState(null);
+  
+  // Inicialização resiliente com cache local
+  const [settings, setSettings] = useState(() => {
+    try {
+      const cached = localStorage.getItem(LOCAL_STORAGE_KEY);
+      return cached ? JSON.parse(cached) : null;
+    } catch {
+      return null;
+    }
+  });
+
   const [logs, setLogs] = useState([]);
   const [soundEnabled, setSoundEnabled] = useState(false);
 
@@ -24,6 +36,7 @@ export default function App() {
   const lastSeenBacktestTimestampRef = useRef(null);
 
   useEffect(() => {
+    // 1. Carrega Status
     supabase.from('copilot_status').select('*').eq('id', 1).single()
       .then(r => {
         if (r.data) {
@@ -35,12 +48,23 @@ export default function App() {
         }
       });
 
+    // 2. Carrega Configurações com fallback e mesclagem
     supabase.from('copilot_settings').select('*').eq('id', 1).single()
-      .then(r => r.data && setSettings(r.data));
+      .then(r => {
+        if (r.data) {
+          setSettings(prev => {
+            const merged = { ...prev, ...r.data };
+            localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(merged));
+            return merged;
+          });
+        }
+      });
 
+    // 3. Carrega Logs
     supabase.from('copilot_logs').select('*').order('created_at', { ascending: false }).limit(40)
       .then(r => r.data && setLogs(r.data));
 
+    // 4. Canal em Tempo Real
     const channel = supabase.channel('copilot_realtime_sync')
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'copilot_status' }, p => {
         setStatus(p.new);
@@ -58,7 +82,11 @@ export default function App() {
         }
       })
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'copilot_settings' }, p => {
-        setSettings(p.new);
+        setSettings(prev => {
+          const merged = { ...prev, ...p.new };
+          localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(merged));
+          return merged;
+        });
       })
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'copilot_logs' }, p => {
         setLogs(prev => [p.new, ...prev.slice(0, 45)]);
@@ -84,9 +112,24 @@ export default function App() {
     return () => supabase.removeChannel(channel);
   }, [soundEnabled]);
 
+  // Atualização garantida e atômica
   const handleUpdateSettings = async (newFields) => {
-    setSettings(prev => ({ ...prev, ...newFields }));
-    await supabase.from('copilot_settings').update(newFields).eq('id', 1);
+    setSettings(prev => {
+      const updated = { ...prev, ...newFields };
+      try {
+        localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(updated));
+      } catch {}
+      return updated;
+    });
+
+    try {
+      const { error } = await supabase.from('copilot_settings').update(newFields).eq('id', 1);
+      if (error) {
+        console.warn("⚠️ Aviso ao persistir no Supabase:", error.message);
+      }
+    } catch (err) {
+      console.error("Falha de rede ao salvar configurações:", err);
+    }
   };
 
   const handleEmergencyStop = async () => {
