@@ -1,4 +1,4 @@
-# risk_manager.py — Gestão de Risco com Persistência em Disco, Blindagem FTMO, BE 1.2R e Trailing 1.5R
+# risk_manager.py — Gestão de Risco com Paridade Institucional NASDAQ vs XAUUSD, FTMO Shield, BE 1.2R e Trailing 1.5R
 import MetaTrader5 as mt5
 import pandas as pd
 import math
@@ -17,11 +17,9 @@ class RiskManager:
         self.daily_lock_active = False
         self.current_broker_day_str = None
 
-        # Carrega estado persistido para sobreviver a reinicializações
         self._load_state()
 
     def _load_state(self):
-        """Lê o estado do dia gravado em disco."""
         if os.path.exists(self.state_file):
             try:
                 with open(self.state_file, "r") as f:
@@ -30,12 +28,11 @@ class RiskManager:
                     self.start_day_balance = float(data.get("start_balance", 0.0))
                     self.peak_day_equity = float(data.get("peak_equity", self.start_day_balance))
                     self.daily_lock_active = bool(data.get("daily_lock_active", False))
-                    print(f"📁 [RISK SHIELD] Estado diário restaurado do disco: Data={self.current_broker_day_str} | Base=${self.start_day_balance:.2f} | Lock={self.daily_lock_active}")
+                    print(f"📁 [RISK SHIELD] Estado restaurado: Data={self.current_broker_day_str} | Base=${self.start_day_balance:.2f} | Lock={self.daily_lock_active}")
             except Exception as e:
                 print(f"⚠️ [RISK SHIELD] Falha ao ler {self.state_file}: {e}")
 
     def _save_state(self):
-        """Grava atomicamente o estado em disco."""
         try:
             payload = {
                 "date": self.current_broker_day_str,
@@ -52,14 +49,13 @@ class RiskManager:
         now = broker_server_time or datetime.now()
         today_str = now.strftime('%Y-%m-%d')
 
-        # Virada de dia no servidor do broker
         if self.current_broker_day_str != today_str:
             self.current_broker_day_str = today_str
             self.start_day_balance = max(current_balance, current_equity)
             self.peak_day_equity = current_equity
             self.daily_lock_active = False
             self._save_state()
-            print(f"🔄 [PROP FIRM SHIELD] Novo dia no servidor ({today_str}). Benchmark inicial: ${self.start_day_balance:.2f}")
+            print(f"🔄 [PROP FIRM SHIELD] Novo dia no servidor ({today_str}). Benchmark: ${self.start_day_balance:.2f}")
 
         if self.start_day_balance is None:
             self.start_day_balance = max(current_balance, current_equity)
@@ -94,9 +90,21 @@ class RiskManager:
         return round(float(atr), 2)
 
     def get_trade_parameters(self, profile, fvg, atr, symbol, direction, use_ce_50=True):
+        """
+        Calcula parâmetros de execução com separação de regimes de volatilidade para NASDAQ e OURO.
+        """
         is_nasdaq = any(x in symbol.upper() for x in ["US100", "NAS", "USTEC", "NQ"])
-        buffer = 1.0 if is_nasdaq else 0.30
-        max_allowed_risk = 25.0 if is_nasdaq else 3.50
+
+        if is_nasdaq:
+            # NASDAQ (Pontos de Índice): Folgas maiores para oscilações de 15 a 40 pts
+            buffer = 3.50               
+            min_stop_points = 12.00     
+            max_allowed_risk = 35.00    
+        else:
+            # XAUUSD (Dólares por Onça): Buffer para absorver spread ($0.30) e micropavios
+            buffer = 0.90               
+            min_stop_points = 2.50      
+            max_allowed_risk = 5.00     
 
         fvg_top = float(fvg['top'])
         fvg_bottom = float(fvg['bottom'])
@@ -105,7 +113,7 @@ class RiskManager:
         if direction == 'BUY':
             entry_price = ce_price if use_ce_50 else fvg_top
             raw_risk = (entry_price - fvg_bottom) + buffer
-            risk = min(max(raw_risk, 1.5 if is_nasdaq else 0.4), max_allowed_risk)
+            risk = min(max(raw_risk, min_stop_points), max_allowed_risk)
 
             if profile == 'sniper': tp_price = entry_price + (risk * 4.0)
             elif profile == 'tatico': tp_price = entry_price + (risk * 2.5)
@@ -115,7 +123,7 @@ class RiskManager:
         else: # SELL
             entry_price = ce_price if use_ce_50 else fvg_bottom
             raw_risk = (fvg_top - entry_price) + buffer
-            risk = min(max(raw_risk, 1.5 if is_nasdaq else 0.4), max_allowed_risk)
+            risk = min(max(raw_risk, min_stop_points), max_allowed_risk)
 
             if profile == 'sniper': tp_price = entry_price - (risk * 4.0)
             elif profile == 'tatico': tp_price = entry_price - (risk * 2.5)
@@ -130,7 +138,6 @@ class RiskManager:
         }
 
     def calculate_lot_size(self, symbol, risk_points):
-        """Cálculo de lote à prova de falhas para NASDAQ e GOLD, com fallbacks contratuais."""
         info = mt5.symbol_info(symbol)
         if not info:
             return 0.01
@@ -141,7 +148,6 @@ class RiskManager:
         tick_size = info.trade_tick_size or info.point or 0.01
         tick_value = info.trade_tick_value
 
-        # Fallback de segurança caso o MT5 retorne tick_value zerado
         if not tick_value or tick_value <= 0:
             if is_gold:
                 tick_value = (info.trade_contract_size or 100.0) * tick_size
@@ -173,9 +179,6 @@ class RiskManager:
         return round(lot_size, 2)
 
     def calculate_safe_breakeven_sl(self, symbol, position_type, open_price, current_price, initial_risk_points, r_trigger=1.2):
-        """
-        Garante que o Break-Even só é ativado se o trade tiver atingido r_trigger * Risco Inicial (Padrão 1.2R).
-        """
         info = mt5.symbol_info(symbol)
         if not info or initial_risk_points <= 0:
             return None
@@ -187,7 +190,6 @@ class RiskManager:
         min_profit_required = initial_risk_points * r_trigger
 
         if position_type == mt5.POSITION_TYPE_BUY:
-            # Trava matemática: precisa ter andado 1.2R a favor
             if (current_price - open_price) < min_profit_required:
                 return None
             proposed_sl = open_price + min_offset
@@ -196,7 +198,6 @@ class RiskManager:
             return round(proposed_sl, info.digits)
 
         elif position_type == mt5.POSITION_TYPE_SELL:
-            # Trava matemática: precisa ter andado 1.2R a favor
             if (open_price - current_price) < min_profit_required:
                 return None
             proposed_sl = open_price - min_offset
@@ -207,16 +208,14 @@ class RiskManager:
         return None
 
     def calculate_safe_trailing_sl(self, symbol, position_type, open_price, current_price, current_sl, last_m1_low, last_m1_high, initial_risk_points=0.0, r_trigger=1.5):
-        """
-        Rastreia vela a vela M1 apenas após o trade avançar no mínimo 1.5R, sem violar stops_level.
-        """
         info = mt5.symbol_info(symbol)
         if not info:
             return None
 
+        is_nasdaq = any(x in symbol.upper() for x in ["US100", "NAS", "USTEC", "NQ"])
         point = info.point
         stops_level = (info.trade_stops_level or 0) * point
-        buffer = 3 * point
+        buffer = (2.0 if is_nasdaq else 0.40)
 
         min_profit_required = (initial_risk_points * r_trigger) if initial_risk_points > 0 else 0.0
 

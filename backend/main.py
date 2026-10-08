@@ -1,4 +1,4 @@
-# main.py — Orquestrador HFT com Modo Fiel ao Backtest (1:1), Sessão Personalizável e Blindagem FTMO
+# main.py — Orquestrador HFT com Modo Fiel ao Backtest, Paridade 1:1 NASDAQ/XAUUSD e Execução ECN
 import time
 import json
 import requests
@@ -370,6 +370,10 @@ def get_performance_stats(risk_base=50.0):
 
 
 def run_recent_backtest(engine, symbol, days=0, risk_per_trade=50.0, session_mode="KILLZONES"):
+    """
+    Sandbox com PARIDADE 1:1 REALISTA com a execução do MT5.
+    Exige que o Bid fure o spread para que o Ask atinja a ordem limite de compra.
+    """
     if not symbol: return None
 
     broker_now = engine.get_broker_current_time(symbol)
@@ -390,12 +394,20 @@ def run_recent_backtest(engine, symbol, days=0, risk_per_trade=50.0, session_mod
     if df_m5 is None or df_m1 is None: return None
 
     is_nasdaq = any(x in symbol.upper() for x in ["US100", "NAS", "USTEC", "NQ"])
-    min_stop_points = 5.0 if is_nasdaq else 1.2
-    max_risk = 30.0 if is_nasdaq else 4.5
+    
+    # PARIDADE COM O RISK_MANAGER:
+    if is_nasdaq:
+        buffer_pts = 3.50
+        min_stop_points = 12.00
+        max_risk = 35.00
+    else:
+        buffer_pts = 0.90
+        min_stop_points = 2.50
+        max_risk = 5.00
 
     info = mt5.symbol_info(symbol)
     point = info.point if info else 0.01
-    spread_pts = (info.spread * point) if (info and info.spread > 0) else (1.5 if is_nasdaq else 0.25)
+    spread_pts = (info.spread * point) if (info and info.spread > 0) else (1.8 if is_nasdaq else 0.30)
     slippage_pts = 0.8 if is_nasdaq else 0.15
     commission_r = 0.04
 
@@ -443,7 +455,6 @@ def run_recent_backtest(engine, symbol, days=0, risk_per_trade=50.0, session_mod
                         if day_locked or daily_trade_count >= 5:
                             continue
 
-                        # Respeita o modo de sessão escolhido (24H ou KILLZONES)
                         if not InstitutionalSessionFilter.is_session_active(
                             symbol, f['raw_time'], engine.broker_utc_offset_hours, session_mode=session_mode
                         ):
@@ -456,7 +467,7 @@ def run_recent_backtest(engine, symbol, days=0, risk_per_trade=50.0, session_mod
                         raw_entry = f['ce_50'] if use_ce_50 else (f['top'] if direction == "BUY" else f['bottom'])
 
                         raw_dist = abs(raw_entry - (f['bottom'] if direction == "BUY" else f['top']))
-                        risk = min(max(raw_dist + (1.2 if is_nasdaq else 0.4), min_stop_points), max_risk)
+                        risk = min(max(raw_dist + buffer_pts, min_stop_points), max_risk)
 
                         tp = raw_entry + (risk * mult) if direction == "BUY" else raw_entry - (risk * mult)
                         sl = raw_entry - risk if direction == "BUY" else raw_entry + risk
@@ -482,60 +493,53 @@ def run_recent_backtest(engine, symbol, days=0, risk_per_trade=50.0, session_mod
                         win, loss, hit_be = False, False, False
                         trade_resolved_idx = start_idx
 
-                        strict_fill_penetration = spread_pts * 0.4
-                        if direction == "BUY":
-                            effective_entry = raw_entry + spread_pts + slippage_pts
-                            effective_tp = tp
-                            effective_sl = sl
-                        else:
-                            effective_entry = raw_entry - slippage_pts
-                            effective_tp = tp + spread_pts
-                            effective_sl = sl + spread_pts
-
+                        # PREENCHIMENTO REALISTA COM SPREAD:
+                        # Buy Limit só executa se a mínima da vela M1 for menor que (raw_entry - spread_pts)
+                        # Sell Limit executa no toque direto da máxima
                         for step, (h, l) in enumerate(zip(sim_slice_h, sim_slice_l)):
                             current_m1_idx = start_idx + step
 
                             if not triggered:
-                                if direction == "BUY" and l <= (raw_entry - strict_fill_penetration): 
+                                if direction == "BUY" and l <= (raw_entry - spread_pts): 
                                     triggered = True
-                                elif direction == "SELL" and h >= (raw_entry + strict_fill_penetration): 
+                                elif direction == "SELL" and h >= raw_entry: 
                                     triggered = True
                                 if not triggered: 
                                     continue
 
                             if with_be and not hit_be:
-                                if direction == "BUY" and h >= (effective_entry + risk * 1.2): hit_be = True
-                                elif direction == "SELL" and l <= (effective_entry - risk * 1.2): hit_be = True
+                                if direction == "BUY" and h >= (raw_entry + risk * 1.2): hit_be = True
+                                elif direction == "SELL" and l <= (raw_entry - risk * 1.2): hit_be = True
 
                             if direction == "BUY":
-                                hit_tp = (h >= effective_tp)
-                                hit_sl = (l <= effective_sl) if not hit_be else (l <= effective_entry)
+                                effective_tp = tp
+                                effective_sl = sl if not hit_be else raw_entry
                                 
-                                if hit_sl and hit_tp:
+                                if l <= effective_sl and h >= effective_tp:
                                     loss = True if not hit_be else False
                                     trade_resolved_idx = current_m1_idx
                                     break
-                                elif hit_sl:
+                                elif l <= effective_sl:
                                     loss = True if not hit_be else False
                                     trade_resolved_idx = current_m1_idx
                                     break
-                                elif hit_tp:
+                                elif h >= effective_tp:
                                     win = True
                                     trade_resolved_idx = current_m1_idx
                                     break
                             else:
-                                hit_tp = (l <= effective_tp)
-                                hit_sl = (h >= effective_sl) if not hit_be else (h >= effective_entry)
+                                effective_tp = tp + spread_pts
+                                effective_sl = (sl + spread_pts) if not hit_be else raw_entry
                                 
-                                if hit_sl and hit_tp:
+                                if h >= effective_sl and l <= effective_tp:
                                     loss = True if not hit_be else False
                                     trade_resolved_idx = current_m1_idx
                                     break
-                                elif hit_sl:
+                                elif h >= effective_sl:
                                     loss = True if not hit_be else False
                                     trade_resolved_idx = current_m1_idx
                                     break
-                                elif hit_tp:
+                                elif l <= effective_tp:
                                     win = True
                                     trade_resolved_idx = current_m1_idx
                                     break
@@ -607,7 +611,7 @@ def run_recent_backtest(engine, symbol, days=0, risk_per_trade=50.0, session_mod
         "base_risk": risk_per_trade,
         "strategy_info": {
             "mode": "Execução Sequencial (Max 5 Trades/Dia)",
-            "frictions": f"Spread ({spread_pts:.2f}) + Slippage + Trava Meta/Loss",
+            "frictions": f"Spread Real ({spread_pts:.2f}) + Slippage + Trava Meta/Loss",
             "context": "Sessão Atual (Hoje)" if days == 0 else f"Histórico Real {days}D",
             "session": "24H (Full Day)" if session_mode == "24H" else "Killzones Institucionais (Londres/NY)"
         },
@@ -644,7 +648,7 @@ def main():
     active_mode = "BOTH"
     cached_settings = {}
 
-    sync.add_log(None, "Motor conectado com Escudo Ativo e Break-Even Institucional 1.2R.", "INFO")
+    sync.add_log(None, "Motor conectado com Escudo Ativo e Paridade 1:1 NASDAQ/XAUUSD.", "INFO")
 
     try:
         while True:
@@ -666,7 +670,6 @@ def main():
             else:
                 balance, equity, pnl_today, login, server = 0, 0, 0, "--", "--"
 
-            # Modo Fiel ao Backtest (se True, desliga travas eliminatórias extras)
             raw_backtest_mode = bool(cached_settings.get("raw_backtest_mode", False))
 
             is_news = False
@@ -680,7 +683,6 @@ def main():
             agora = time.time()
             if agora - last_hb >= 2.0:
                 last_hb = agora
-                # No modo fiel aguarda 60m para dar tempo do pullback; no modo estrito 15m
                 purge_stale_pending_orders(max_age_minutes=60 if raw_backtest_mode else 15)
 
                 remote = sync.check_remote_settings()
@@ -790,7 +792,6 @@ def main():
                     "session_mode": "KILLZONES" if category == "NASDAQ" else "24H"
                 }
 
-                # Sessão Independente por Ativo
                 asset_session_mode = asset_cfg.get("session_mode", "KILLZONES")
                 if not InstitutionalSessionFilter.is_session_active(
                     symbol, broker_time, engine.broker_utc_offset_hours, session_mode=asset_session_mode
@@ -835,7 +836,6 @@ def main():
                     if fvg_id in processed_fvgs:
                         continue
 
-                    # Idade máxima tolerada: 12 candles (~1 hora) no modo fiel, 4 no estrito
                     max_allowed_age = 12 if raw_backtest_mode else 4
                     if fvg.get('age_candles', 0) > max_allowed_age:
                         processed_fvgs.add(fvg_id)
@@ -848,14 +848,11 @@ def main():
                     direction = "BUY" if fvg['type'] == 'BULLISH' else "SELL"
                     entry_candidate = fvg['ce_50'] if use_ce_50 else (fvg['top'] if direction == "BUY" else fvg['bottom'])
 
-                    # CORREÇÃO CRÍTICA DO BUG DE DISTÂNCIA:
-                    # Apenas pula se o preço atual estiver distante, MAS NUNCA adiciona em processed_fvgs prematuramente!
                     max_dist = 25.0 if any(x in symbol.upper() for x in ["US100", "NAS", "USTEC", "NQ"]) else 4.5
                     dist = abs(current_price - entry_candidate)
                     if dist > max_dist:
                         continue
 
-                    # Filtro de M15 executado somente no modo blindado
                     if not raw_backtest_mode:
                         if direction == "BUY" and "BEARISH" in structure:
                             processed_fvgs.add(fvg_id)
@@ -874,7 +871,6 @@ def main():
                         sync.add_log(symbol, f"Descartado por visão: {path_msg}", "WARN")
                         continue
 
-                    # Veto da IA Groq apenas no modo blindado
                     if not raw_backtest_mode:
                         ai_ok, ai_reason = ia_agent.quick_validate_trade(category, direction, active_profile_for_trade)
                         if not ai_ok:

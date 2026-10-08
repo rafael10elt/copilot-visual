@@ -1,4 +1,4 @@
-# strategy_scout.py — Calibrador Walk-Forward Institucional de 30 Dias por Ativo
+# strategy_scout.py — Calibrador Walk-Forward Institucional de 30 Dias com Paridade 1:1 e Fricção ECN
 import time
 import threading
 import MetaTrader5 as mt5
@@ -15,7 +15,6 @@ class StrategyScout:
         self.is_running = False
         self.thread = None
         
-        # Diretrizes com base de 30 dias para cada ativo
         self.active_directives = {
             "NASDAQ": {
                 "use_ce_50": True, 
@@ -42,16 +41,15 @@ class StrategyScout:
             self.is_running = True
             self.thread = threading.Thread(target=self._run_loop, daemon=True)
             self.thread.start()
-            print("🔭 [STRATEGY SCOUT 30D] Motor de calibração mensal por ativo iniciado.")
+            print("🔭 [STRATEGY SCOUT 30D] Motor de calibração mensal iniciado com paridade 1:1.")
 
     def _run_loop(self):
         time.sleep(5)
         while self.is_running:
             try:
-                # Otimização com janela institucional de 30 dias de pregão
                 self.run_full_evaluation(days=30)
             except Exception as e:
-                print(f"⚠️ [STRATEGY SCOUT] Falha na calibração de 30D: {e}")
+                print(f"⚠️ [STRATEGY SCOUT] Falha na calibração: {e}")
 
             time.sleep(self.interval)
 
@@ -84,12 +82,20 @@ class StrategyScout:
             return None
 
         is_nasdaq = any(x in symbol.upper() for x in ["US100", "NAS", "USTEC", "NQ"])
-        min_stop_points = 5.0 if is_nasdaq else 1.2
-        max_risk = 30.0 if is_nasdaq else 4.5
+        
+        # Parâmetros com paridade estrita com o risk_manager.py
+        if is_nasdaq:
+            buffer_pts = 3.50
+            min_stop_points = 12.00
+            max_risk = 35.00
+        else:
+            buffer_pts = 0.90
+            min_stop_points = 2.50
+            max_risk = 5.00
 
         info = mt5.symbol_info(symbol)
         point = info.point if info else 0.01
-        spread_pts = (info.spread * point) if (info and info.spread > 0) else (1.5 if is_nasdaq else 0.25)
+        spread_pts = (info.spread * point) if (info and info.spread > 0) else (1.8 if is_nasdaq else 0.30)
         slippage_pts = 0.8 if is_nasdaq else 0.15
 
         detector = FVGDetector()
@@ -138,7 +144,7 @@ class StrategyScout:
                         continue
 
                     if not InstitutionalSessionFilter.is_session_active(
-                        symbol, f['raw_time'], self.engine.broker_utc_offset_hours
+                        symbol, f['raw_time'], self.engine.broker_utc_offset_hours, session_mode="KILLZONES"
                     ):
                         continue
 
@@ -149,7 +155,7 @@ class StrategyScout:
                     entry = f['ce_50'] if comb["use_ce_50"] else (f['top'] if direction == "BUY" else f['bottom'])
 
                     raw_dist = abs(entry - (f['bottom'] if direction == "BUY" else f['top']))
-                    risk = min(max(raw_dist + (1.2 if is_nasdaq else 0.4), min_stop_points), max_risk)
+                    risk = min(max(raw_dist + buffer_pts, min_stop_points), max_risk)
 
                     tp = entry + (risk * mult) if direction == "BUY" else entry - (risk * mult)
                     sl = entry - risk if direction == "BUY" else entry + risk
@@ -160,7 +166,6 @@ class StrategyScout:
                     if not path_ok:
                         continue
 
-                    # Busca binária O(log N) para simular velas M1 sem lentidão em 30 dias
                     start_idx = int(np.searchsorted(m1_times, np.datetime64(f['raw_time']), side='right'))
 
                     if start_idx >= len(m1_times) or start_idx <= bot_busy_until_m1_idx:
@@ -173,13 +178,14 @@ class StrategyScout:
                     win, loss, hit_be = False, False, False
                     trade_res_idx = start_idx
 
-                    strict_fill_penetration = spread_pts * 0.4
-
+                    # ECN REALISM: Compra só abre se o Bid furar o spread para que o Ask toque o limite
                     for step, (h, l) in enumerate(zip(sim_h, sim_l)):
                         cur_idx = start_idx + step
                         if not triggered:
-                            if direction == "BUY" and l <= (entry - strict_fill_penetration): triggered = True
-                            elif direction == "SELL" and h >= (entry + strict_fill_penetration): triggered = True
+                            if direction == "BUY" and l <= (entry - spread_pts): 
+                                triggered = True
+                            elif direction == "SELL" and h >= entry: 
+                                triggered = True
                             if not triggered: continue
 
                         if not hit_be:
@@ -187,15 +193,23 @@ class StrategyScout:
                             elif direction == "SELL" and l <= (entry - risk * 1.2): hit_be = True
 
                         if direction == "BUY":
-                            if l <= sl and h >= tp: loss = True; trade_res_idx = cur_idx; break
-                            elif hit_be and l <= entry: be_exits += 1; trade_res_idx = cur_idx; break
-                            elif not hit_be and l <= sl: loss = True; trade_res_idx = cur_idx; break
-                            elif h >= tp: win = True; trade_res_idx = cur_idx; break
+                            effective_tp = tp
+                            effective_sl = sl if not hit_be else entry
+                            if l <= effective_sl and h >= effective_tp: loss = True; trade_res_idx = cur_idx; break
+                            elif l <= effective_sl: 
+                                if hit_be: be_exits += 1 
+                                else: loss = True
+                                trade_res_idx = cur_idx; break
+                            elif h >= effective_tp: win = True; trade_res_idx = cur_idx; break
                         else:
-                            if h >= sl and l <= tp: loss = True; trade_res_idx = cur_idx; break
-                            elif hit_be and h >= entry: be_exits += 1; trade_res_idx = cur_idx; break
-                            elif not hit_be and h >= sl: loss = True; trade_res_idx = cur_idx; break
-                            elif l <= tp: win = True; trade_res_idx = cur_idx; break
+                            effective_tp = tp + spread_pts
+                            effective_sl = (sl + spread_pts) if not hit_be else entry
+                            if h >= effective_sl and l <= effective_tp: loss = True; trade_res_idx = cur_idx; break
+                            elif h >= effective_sl: 
+                                if hit_be: be_exits += 1 
+                                else: loss = True
+                                trade_res_idx = cur_idx; break
+                            elif l <= effective_tp: win = True; trade_res_idx = cur_idx; break
 
                     if triggered:
                         daily_trades += 1
@@ -214,9 +228,7 @@ class StrategyScout:
                             day_locked = True
 
                 total_resolved = wins + losses
-                
-                # Exigência de amostragem mínima estatística para a janela de 30 dias
-                if total_resolved < 10:
+                if total_resolved < 8:
                     continue
 
                 win_rate = (wins / total_resolved) * 100.0 if total_resolved > 0 else 0.0
